@@ -37,12 +37,19 @@ func ocr(imagePath: String, splitSpread: Bool) -> String {
         return "[ERROR: could not load \(imagePath)]"
     }
 
-    if !splitSpread {
+    let width = cgImage.width
+    let height = cgImage.height
+
+    // portrait images aren't two-page spreads — don't split even if asked
+    if !splitSpread || width < height {
+        if splitSpread && width < height {
+            FileHandle.standardError.write(
+                "note: \(imagePath) is portrait (\(width)x\(height)); treating as single page\n"
+                    .data(using: .utf8)!)
+        }
         return recognize(in: cgImage)
     }
 
-    let width = cgImage.width
-    let height = cgImage.height
     let midX = width / 2
     guard let leftImage = cgImage.cropping(to: CGRect(x: 0, y: 0, width: midX, height: height)),
           let rightImage = cgImage.cropping(to: CGRect(x: midX, y: 0, width: width - midX, height: height)) else {
