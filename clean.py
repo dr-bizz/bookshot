@@ -16,6 +16,11 @@ if len(sys.argv) != 3:
 RAW = Path(sys.argv[1])
 OUT = Path(sys.argv[2])
 
+ROMAN_RE = re.compile(
+    r"\s*(?=[MDCLXVI])M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})\s*",
+    re.IGNORECASE,
+)
+
 # ---------- pre-clean ----------
 lines = RAW.read_text(encoding="utf-8").splitlines()
 
@@ -32,8 +37,9 @@ for line in lines:
     # bare page number
     if re.fullmatch(r"\s*\d{1,3}\s*", s):
         continue
-    # roman-numeral front-matter page numbers
-    if re.fullmatch(r"\s*[ivxlcIVXLC]{1,6}\s*", s):
+    # roman-numeral front-matter page numbers (strict pattern, must be a real
+    # roman number — keeps words like "civil", "ill", "ivy" from being eaten)
+    if ROMAN_RE.fullmatch(s):
         continue
     # normalize bullet glyphs to "- "
     s = re.sub(r"^\s*[•○◦●·]\s*", "- ", s)
@@ -58,8 +64,12 @@ def is_bullet(s: str) -> bool:
 
 def is_allcaps(s: str) -> bool:
     s = s.strip()
+    if not s or s.startswith(('"', "'", "“", "‘", "—", "–", "-")):
+        return False
     letters = [c for c in s if c.isalpha()]
-    return len(letters) >= 2 and all(c.isupper() for c in letters) and len(s) <= 60
+    # require at least 4 letters so two-letter acronyms/initials don't trip it,
+    # and cap length so quoted dialogue or blurbs don't either
+    return len(letters) >= 4 and all(c.isupper() for c in letters) and len(s) <= 60
 
 def ends_sentence(s: str) -> bool:
     """Line ends a sentence (allowing trailing brackets/quotes after the punct,
@@ -67,6 +77,7 @@ def ends_sentence(s: str) -> bool:
     stripped = s.rstrip(TRAIL_STRIP)
     if stripped and stripped[-1] in SENT_END:
         return True
+    # closing bracket/quote with internal sentence-ending punctuation
     if s.rstrip() and s.rstrip()[-1] in ")]}\"'”’" and any(c in s for c in SENT_END):
         return True
     return False
@@ -75,6 +86,8 @@ def is_heading_shape(s: str) -> bool:
     """Line could be a section heading: short and contains no sentence punctuation."""
     s = s.strip()
     if not s or is_bullet(s) or is_allcaps(s):
+        return False
+    if s.startswith(('"', "'", "“", "‘")):
         return False
     if len(s) > 35:
         return False
