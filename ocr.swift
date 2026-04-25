@@ -30,18 +30,32 @@ func recognize(in ci: CGImage) -> String {
     return out.joined(separator: "\n")
 }
 
-func ocr(imagePath: String) -> String {
+func ocr(imagePath: String, splitSpread: Bool) -> String {
     let url = URL(fileURLWithPath: imagePath)
     guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
           let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
         return "[ERROR: could not load \(imagePath)]"
     }
-    return recognize(in: cgImage)
+
+    if !splitSpread {
+        return recognize(in: cgImage)
+    }
+
+    let width = cgImage.width
+    let height = cgImage.height
+    let midX = width / 2
+    guard let leftImage = cgImage.cropping(to: CGRect(x: 0, y: 0, width: midX, height: height)),
+          let rightImage = cgImage.cropping(to: CGRect(x: midX, y: 0, width: width - midX, height: height)) else {
+        return recognize(in: cgImage)
+    }
+    return "\(recognize(in: leftImage))\n\n\(recognize(in: rightImage))"
 }
 
 let args = CommandLine.arguments
 guard args.count >= 2 else {
-    print("usage: ocr.swift <image-path>")
+    print("usage: ocr.swift <image-path> [--no-split]")
     exit(1)
 }
-print(ocr(imagePath: args[1]))
+let path = args[1]
+let split = !args.contains("--no-split")
+print(ocr(imagePath: path, splitSpread: split))
