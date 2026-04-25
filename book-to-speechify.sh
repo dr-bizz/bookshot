@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# book-to-speechify
+#
+# Converts a folder of book-page photos (HEIC/JPG/PNG) into a single plain-text
+# file ready to paste or upload into Speechify.
+#
+# Usage:
+#   book-to-speechify.sh <input-folder> [output-file] [--no-split] [--keep-temp]
+#
+# Requires: macOS (uses sips + Apple Vision via swift), python3.
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: book-to-speechify.sh <input-folder> [output-file] [--no-split] [--keep-temp]
+
+  <input-folder>   Folder containing page photos, sorted in reading order.
+  [output-file]    Output .txt path. Default: <input-folder>/speechify.txt
+  --no-split       Treat each photo as a single page (default: two-page spreads).
+  --keep-temp      Keep the intermediate _book_tmp/ folder for inspection.
+EOF
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 1
+fi
+
+INPUT_DIR="$1"; shift || true
+OUTPUT_FILE=""
+SPLIT_FLAG=""
+KEEP_TEMP=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-split)  SPLIT_FLAG="--no-split"; shift ;;
+    --keep-temp) KEEP_TEMP=1; shift ;;
+    -h|--help)   usage; exit 0 ;;
+    -*) echo "unknown flag: $1" >&2; exit 2 ;;
+    *)  OUTPUT_FILE="$1"; shift ;;
+  esac
+done
+
+if [[ ! -d "$INPUT_DIR" ]]; then
+  echo "not a directory: $INPUT_DIR" >&2
+  exit 1
+fi
+
+INPUT_DIR="$(cd "$INPUT_DIR" && pwd)"
+[[ -z "$OUTPUT_FILE" ]] && OUTPUT_FILE="$INPUT_DIR/speechify.txt"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TMP_DIR="$INPUT_DIR/_book_tmp"
+mkdir -p "$TMP_DIR"
+
+echo "==> converting source photos to JPG in $TMP_DIR"
+shopt -s nullglob nocaseglob
+src_files=( "$INPUT_DIR"/*.heic "$INPUT_DIR"/*.jpg "$INPUT_DIR"/*.jpeg "$INPUT_DIR"/*.png )
+shopt -u nullglob nocaseglob
+
+if [[ ${#src_files[@]} -eq 0 ]]; then
+  echo "no HEIC/JPG/PNG files found in $INPUT_DIR" >&2
+  exit 1
+fi
+
+count=0
+for f in "${src_files[@]}"; do
+  base="$(basename "$f")"
+  stem="${base%.*}"
+  out="$TMP_DIR/${stem}.jpg"
+  if [[ ! -f "$out" ]]; then
+    sips -s format jpeg -Z 2000 "$f" --out "$out" > /dev/null 2>&1
+  fi
+  count=$((count+1))
+done
+echo "    $count photos"
+
+echo "==> running Vision OCR"
+RAW="$TMP_DIR/_raw.txt"
+: > "$RAW"
+
+i=0
+for f in "$TMP_DIR"/*.jpg; do
+  i=$((i+1))
+  printf "\r    page %d/%d" "$i" "$count"
+  base="$(basename "$f")"
+  echo "===== $base =====" >> "$RAW"
+  swift "$SCRIPT_DIR/ocr.swift" "$f" $SPLIT_FLAG >> "$RAW" 2>/dev/null
+done
+echo ""
+
+echo "==> cleaning up text for Speechify"
+python3 "$SCRIPT_DIR/clean.py" "$RAW" "$OUTPUT_FILE"
+
+if [[ $KEEP_TEMP -eq 0 ]]; then
+  rm -rf "$TMP_DIR"
+fi
+
+echo ""
+echo "done. output: $OUTPUT_FILE"
