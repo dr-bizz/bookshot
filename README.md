@@ -1,4 +1,4 @@
-# book-to-speechify
+# bookshot
 
 Snap photos of a book, get a single plain-text file ready to paste into Speechify (or any text-to-speech app).
 
@@ -25,7 +25,7 @@ photos/  →  sips (HEIC→JPG)  →  Apple Vision OCR  →  reflow & clean  →
 ## Usage
 
 ```bash
-./book-to-speechify.sh <input-folder> [output-file] [flags]
+./bookshot.sh <input-folder> [output-file] [flags]
 ```
 
 Flags:
@@ -38,16 +38,16 @@ Examples:
 
 ```bash
 # basic run — output goes to <folder>/speechify.txt
-./book-to-speechify.sh ~/Documents/my-book
+./bookshot.sh ~/Documents/my-book
 
 # custom output path
-./book-to-speechify.sh ~/Documents/my-book ~/Desktop/my-book.txt
+./bookshot.sh ~/Documents/my-book ~/Desktop/my-book.txt
 
 # single-page photos (e.g., from a book scanner app)
-./book-to-speechify.sh ~/Documents/my-book --no-split
+./bookshot.sh ~/Documents/my-book --no-split
 
 # with AI typo cleanup
-./book-to-speechify.sh ~/Documents/my-book --review
+./bookshot.sh ~/Documents/my-book --review
 ```
 
 ### Convenience alias
@@ -55,7 +55,7 @@ Examples:
 Add to `~/.zshrc` to run from anywhere:
 
 ```bash
-alias book-to-speechify="$HOME/path/to/book-to-speechify/book-to-speechify.sh"
+alias bookshot="$HOME/path/to/bookshot/bookshot.sh"
 ```
 
 ## How to take the photos
@@ -76,7 +76,7 @@ alias book-to-speechify="$HOME/path/to/book-to-speechify/book-to-speechify.sh"
 
 | File | Purpose |
 |------|---------|
-| `book-to-speechify.sh` | Orchestrates the pipeline |
+| `bookshot.sh` | Orchestrates the pipeline |
 | `ocr.swift` | Apple Vision OCR with two-page split and portrait fallback |
 | `clean.py` | Reflows raw OCR into Speechify-ready paragraphs |
 | `review.py` | Optional `claude -p` typo-fix pass |

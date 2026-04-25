@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# book-to-speechify
+# bookshot
 #
 # Converts a folder of book-page photos (HEIC/JPG/PNG) into a single plain-text
 # file ready to paste or upload into Speechify.
 #
 # Usage:
-#   book-to-speechify.sh <input-folder> [output-file] [--no-split] [--keep-temp] [--review]
+#   bookshot.sh <input-folder> [output-file] [--no-split] [--keep-temp] [--review]
 #
 #   --review additionally runs an AI cleanup pass via Claude Code (`claude -p`)
 #   to fix obvious OCR typos. Uses your existing Claude Code subscription —
@@ -18,7 +18,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: book-to-speechify.sh <input-folder> [output-file] [--no-split] [--keep-temp] [--review]
+Usage: bookshot.sh <input-folder> [output-file] [--no-split] [--keep-temp] [--review]
 
   <input-folder>   Folder containing page photos, sorted in reading order.
   [output-file]    Output .txt path. Default: <input-folder>/speechify.txt
