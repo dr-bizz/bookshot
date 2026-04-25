@@ -5,20 +5,26 @@
 # file ready to paste or upload into Speechify.
 #
 # Usage:
-#   book-to-speechify.sh <input-folder> [output-file] [--no-split] [--keep-temp]
+#   book-to-speechify.sh <input-folder> [output-file] [--no-split] [--keep-temp] [--review]
+#
+#   --review additionally runs an AI cleanup pass via Claude Code (`claude -p`)
+#   to fix obvious OCR typos. Uses your existing Claude Code subscription —
+#   no separate API billing.
 #
 # Requires: macOS (uses sips + Apple Vision via swift), python3.
+# --review additionally requires the Claude Code CLI (`claude`) on PATH.
 
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: book-to-speechify.sh <input-folder> [output-file] [--no-split] [--keep-temp]
+Usage: book-to-speechify.sh <input-folder> [output-file] [--no-split] [--keep-temp] [--review]
 
   <input-folder>   Folder containing page photos, sorted in reading order.
   [output-file]    Output .txt path. Default: <input-folder>/speechify.txt
   --no-split       Treat each photo as a single page (default: two-page spreads).
   --keep-temp      Keep the intermediate _book_tmp/ folder for inspection.
+  --review         AI pass via Claude Code to fix OCR typos.
 EOF
 }
 
@@ -31,11 +37,13 @@ INPUT_DIR="$1"; shift || true
 OUTPUT_FILE=""
 SPLIT_FLAG=""
 KEEP_TEMP=0
+REVIEW=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-split)  SPLIT_FLAG="--no-split"; shift ;;
     --keep-temp) KEEP_TEMP=1; shift ;;
+    --review)    REVIEW=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *)  OUTPUT_FILE="$1"; shift ;;
@@ -116,6 +124,12 @@ echo ""
 
 echo "==> cleaning up text for Speechify"
 python3 "$SCRIPT_DIR/clean.py" "$RAW" "$OUTPUT_FILE"
+
+if [[ $REVIEW -eq 1 ]]; then
+  if ! python3 "$SCRIPT_DIR/review.py" "$OUTPUT_FILE"; then
+    echo "    review pass had errors — output kept at $OUTPUT_FILE" >&2
+  fi
+fi
 
 echo ""
 echo "done. output: $OUTPUT_FILE"
