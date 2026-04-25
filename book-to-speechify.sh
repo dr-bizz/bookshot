@@ -94,8 +94,14 @@ SWIFT_LOG="$TMP_DIR/_swift.log"
 : > "$RAW"
 : > "$SWIFT_LOG"
 
+# natural-sort the converted jpgs so page2 < page10
+jpgs=()
+while IFS= read -r line; do
+  jpgs+=("$line")
+done < <(printf '%s\n' "$TMP_DIR"/*.jpg | LC_ALL=C sort -V)
+
 i=0
-for f in "$TMP_DIR"/*.jpg; do
+for f in "${jpgs[@]}"; do
   i=$((i+1))
   printf "\r    page %d/%d" "$i" "$count"
   base="$(basename "$f")"
