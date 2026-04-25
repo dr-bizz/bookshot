@@ -54,6 +54,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP_DIR="$INPUT_DIR/_book_tmp"
 mkdir -p "$TMP_DIR"
 
+cleanup() {
+  if [[ $KEEP_TEMP -eq 0 && -n "${TMP_DIR:-}" && -d "$TMP_DIR" ]]; then
+    rm -rf "$TMP_DIR"
+  fi
+}
+trap cleanup EXIT INT TERM
+
 echo "==> converting source photos to JPG in $TMP_DIR"
 shopt -s nullglob nocaseglob
 src_files=( "$INPUT_DIR"/*.heic "$INPUT_DIR"/*.jpg "$INPUT_DIR"/*.jpeg "$INPUT_DIR"/*.png )
@@ -64,13 +71,18 @@ if [[ ${#src_files[@]} -eq 0 ]]; then
   exit 1
 fi
 
+# Stem collisions (e.g. foo.HEIC + foo.jpg) resolve via the file-existence
+# check below — first encountered wins, the second is silently skipped.
 count=0
 for f in "${src_files[@]}"; do
   base="$(basename "$f")"
   stem="${base%.*}"
   out="$TMP_DIR/${stem}.jpg"
   if [[ ! -f "$out" ]]; then
-    sips -s format jpeg -Z 2000 "$f" --out "$out" > /dev/null 2>&1
+    if ! sips -s format jpeg -Z 2000 "$f" --out "$out" > /dev/null; then
+      echo "    failed to convert: $f" >&2
+      exit 1
+    fi
   fi
   count=$((count+1))
 done
@@ -78,7 +90,9 @@ echo "    $count photos"
 
 echo "==> running Vision OCR"
 RAW="$TMP_DIR/_raw.txt"
+SWIFT_LOG="$TMP_DIR/_swift.log"
 : > "$RAW"
+: > "$SWIFT_LOG"
 
 i=0
 for f in "$TMP_DIR"/*.jpg; do
@@ -86,16 +100,16 @@ for f in "$TMP_DIR"/*.jpg; do
   printf "\r    page %d/%d" "$i" "$count"
   base="$(basename "$f")"
   echo "===== $base =====" >> "$RAW"
-  swift "$SCRIPT_DIR/ocr.swift" "$f" $SPLIT_FLAG >> "$RAW" 2>/dev/null
+  if ! swift "$SCRIPT_DIR/ocr.swift" "$f" $SPLIT_FLAG >> "$RAW" 2>>"$SWIFT_LOG"; then
+    echo ""
+    echo "    OCR failed on $base — see $SWIFT_LOG" >&2
+    exit 1
+  fi
 done
 echo ""
 
 echo "==> cleaning up text for Speechify"
 python3 "$SCRIPT_DIR/clean.py" "$RAW" "$OUTPUT_FILE"
-
-if [[ $KEEP_TEMP -eq 0 ]]; then
-  rm -rf "$TMP_DIR"
-fi
 
 echo ""
 echo "done. output: $OUTPUT_FILE"
