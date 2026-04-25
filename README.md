@@ -11,6 +11,8 @@ photos/  →  sips (HEIC→JPG)  →  Apple Vision OCR  →  reflow & clean  →
                                                                     ↘ optional Claude Code review
 ```
 
+`bookshot.sh` is the orchestrator. Behind it:
+
 1. **`sips`** converts every HEIC/JPG/JPEG/PNG in the input folder to a normalized JPG.
 2. **`ocr.swift`** runs Apple Vision text recognition on each image. Two-page spreads are split down the middle and each page is OCR'd top-to-bottom.
 3. **`clean.py`** reflows the raw OCR — strips page numbers and per-page headers, joins wrapped paragraph lines into single-line paragraphs (Speechify treats every line break as a sentence boundary), keeps headings and bullet items on their own lines.
@@ -20,7 +22,7 @@ photos/  →  sips (HEIC→JPG)  →  Apple Vision OCR  →  reflow & clean  →
 
 - macOS (uses `sips` and Apple's Vision framework via Swift)
 - `python3` (stdlib only)
-- `--review` requires the [Claude Code](https://claude.ai/code) CLI on your `PATH`
+- `--review` requires the [Claude Code](https://claude.ai/code) CLI on your `PATH`. It runs `claude -p` headlessly against your existing Claude Code subscription — no separate API key or billing.
 
 ## Usage
 
