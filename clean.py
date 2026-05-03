@@ -21,6 +21,58 @@ ROMAN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ---------- hyphen rejoin ----------
+DICT_PATH = Path("/usr/share/dict/words")
+WORDS: set[str] = set()
+if DICT_PATH.exists():
+    WORDS = {w.strip().lower() for w in DICT_PATH.read_text().splitlines() if w.strip()}
+
+HYPHEN_BREAK_RE = re.compile(r"(\w+)-\n(\w+)")
+# common English inflections — macOS dict is base-form-only, so we try stripping
+INFLECTIONS = ("s", "es", "ed", "d", "ing", "er", "est", "ly", "ies", "ier", "iest")
+
+
+def looks_like_word(w: str) -> bool:
+    if not WORDS:
+        return False
+    w = w.lower()
+    if w in WORDS:
+        return True
+    for suf in INFLECTIONS:
+        if w.endswith(suf) and len(w) > len(suf):
+            base = w[: -len(suf)]
+            if base in WORDS:
+                return True
+            # -ies → -y (babies → baby)
+            if suf in ("ies", "ier", "iest") and (base + "y") in WORDS:
+                return True
+            # consonant doubling (running → run, bigger → big)
+            if suf in ("ed", "ing", "er", "est") and len(base) >= 2 and base[-1] == base[-2] and base[:-1] in WORDS:
+                return True
+    return False
+
+
+def rejoin_hyphenated_breaks(text: str) -> str:
+    """Decide for each "<word>-\\n<word>" whether the hyphen was a wrap
+    artifact ("peo-\\nple" → "people") or part of a real compound
+    ("Personal-\\nBest" → "Personal-Best")."""
+
+    def replace(m: re.Match) -> str:
+        left, right = m.group(1), m.group(2)
+        # joined form is a real word → it was a wrap break
+        if looks_like_word(left + right):
+            return left + right
+        # both halves are real words on their own → real hyphenated compound
+        if looks_like_word(left) and looks_like_word(right):
+            return f"{left}-{right}"
+        # both halves capitalized → likely a proper-noun compound (e.g. "T-Mobile")
+        if left[:1].isupper() and right[:1].isupper():
+            return f"{left}-{right}"
+        # default: assume wrap artifact (most common case)
+        return left + right
+
+    return HYPHEN_BREAK_RE.sub(replace, text)
+
 # ---------- pre-clean ----------
 lines = RAW.read_text(encoding="utf-8").splitlines()
 
@@ -46,8 +98,7 @@ for line in lines:
     pre.append(s)
 
 text = "\n".join(pre)
-# rejoin hyphenated line breaks: "pebble-\nlike" → "pebble-like"
-text = re.sub(r"(\w)-\n(\w)", r"\1-\2", text)
+text = rejoin_hyphenated_breaks(text)
 # collapse runs of blank lines
 text = re.sub(r"\n{3,}", "\n\n", text)
 processed = text.splitlines()

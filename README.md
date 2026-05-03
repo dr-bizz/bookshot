@@ -72,7 +72,7 @@ alias bookshot="$HOME/path/to/bookshot/bookshot.sh"
 - Designed for prose books with chapter headings, paragraphs, and bullet lists. Novels with stylized typography or textbooks with multi-column layouts may produce mixed-up output.
 - The single OCR pass on a half-spread reads top-to-bottom in a single column. Side-by-side text blocks within one page will interleave (rare in trade paperbacks).
 - The heading detector caps section headings at 35 characters; longer ones get folded into the next paragraph (still readable, just not visually split).
-- Hyphenated line breaks are rejoined by removing the newline only — `pebble-\nlike` becomes `pebble-like` (correct), but `hap-\npened` becomes `hap-pened` (cosmetic only — Speechify still reads it correctly).
+- Line-break hyphens are resolved against the macOS system dictionary: if the joined form is a real word, the hyphen is dropped (`peo-\nple` → `people`); if both halves are real words but the joined form isn't, the hyphen is kept (`Personal-\nBest`, `self-\naware`). Edge cases with rare/coined words may guess wrong but read fine in TTS.
 
 ## Files
 
