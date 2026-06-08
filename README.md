@@ -11,7 +11,7 @@ photos/  →  sips (HEIC→JPG)  →  Apple Vision OCR  →  reflow & clean  →
                                                                     ↘ optional Claude Code review
 ```
 
-`bookshot.sh` is the orchestrator. Behind it
+`bookshot.sh` is the orchestrator. Behind it:
 
 1. **`sips`** converts every HEIC/JPG/JPEG/PNG in the input folder to a normalized JPG.
 2. **`ocr.swift`** runs Apple Vision text recognition on each image. Two-page spreads are split down the middle and each page is OCR'd top-to-bottom.
