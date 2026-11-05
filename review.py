@@ -12,17 +12,11 @@ small and minimizes content-filter exposure.
 Each fix is applied only when its `find` string matches exactly once.
 """
 import concurrent.futures
-import json
-import re
-import subprocess
 import sys
 from pathlib import Path
 
-if len(sys.argv) != 2:
-    sys.stderr.write("usage: review.py <text-file>\n")
-    sys.exit(2)
-
-TARGET = Path(sys.argv[1])
+import claude_cli
+import textblocks
 
 PROMPT = """\
 You are reviewing OCR'd text from a printed book that will be played back by a
@@ -60,103 +54,21 @@ BEGIN
 
 PROMPT_SUFFIX = "\nEND\n"
 
-CHUNK_TARGET_CHARS = 8000  # rough size budget per Claude call
-TIMEOUT_SECS = 240
+TIMEOUT_SECS = claude_cli.TIMEOUT_SECS
 MAX_WORKERS = 4
 
 
-def split_into_chunks(text: str) -> list[str]:
-    """Split on ALL-CAPS heading lines, then group small chapters together so
-    each chunk is roughly CHUNK_TARGET_CHARS."""
-    lines = text.splitlines()
-    chapters: list[list[str]] = []
-    current: list[str] = []
-    for line in lines:
-        s = line.strip()
-        if s and not s.startswith(('"', "'", "“", "‘", "—", "–", "-")):
-            letters = [c for c in s if c.isalpha()]
-            is_chapter = (
-                len(letters) >= 4
-                and all(c.isupper() for c in letters)
-                and len(s) <= 60
-            )
-        else:
-            is_chapter = False
-        if is_chapter and current:
-            chapters.append(current)
-            current = [line]
-        else:
-            current.append(line)
-    if current:
-        chapters.append(current)
-
-    # group small chapters together up to CHUNK_TARGET_CHARS
-    chunks: list[str] = []
-    buffer: list[str] = []
-    buffer_size = 0
-    for chap in chapters:
-        chap_text = "\n".join(chap)
-        if buffer and buffer_size + len(chap_text) > CHUNK_TARGET_CHARS:
-            chunks.append("\n".join(buffer))
-            buffer = []
-            buffer_size = 0
-        buffer.append(chap_text)
-        buffer_size += len(chap_text) + 1
-    if buffer:
-        chunks.append("\n".join(buffer))
-    return chunks
-
-
-def call_claude(prompt: str) -> tuple[str, str]:
-    """Returns (stdout, error_msg). error_msg is empty on success."""
-    try:
-        result = subprocess.run(
-            ["claude", "-p"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT_SECS,
-        )
-    except FileNotFoundError:
-        return "", "claude CLI not found"
-    except subprocess.TimeoutExpired:
-        return "", f"timeout after {TIMEOUT_SECS}s"
-    if result.returncode != 0:
-        msg = f"exit {result.returncode}"
-        if result.stderr:
-            msg += f": {result.stderr.strip()[:200]}"
-        return "", msg
-    return result.stdout, ""
-
-
 def parse_fixes(raw: str) -> list[dict]:
-    raw = raw.strip()
-    candidates: list[str] = []
-    # 1. plain JSON
-    candidates.append(raw)
-    # 2. fenced code block
-    fence_match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw, re.DOTALL)
-    if fence_match:
-        candidates.append(fence_match.group(1))
-    # 3. outermost-bracket slice
-    start = raw.find("[")
-    end = raw.rfind("]")
-    if start != -1 and end > start:
-        candidates.append(raw[start : end + 1])
-
-    for c in candidates:
-        try:
-            data = json.loads(c)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, list):
-            return [d for d in data if isinstance(d, dict) and "find" in d and "replace" in d]
-    return []
+    """Keep only well-formed {"find", "replace"} objects."""
+    return [
+        d for d in claude_cli.parse_json_array(raw)
+        if isinstance(d, dict) and "find" in d and "replace" in d
+    ]
 
 
 def review_chunk(idx: int, total: int, chunk: str) -> tuple[int, list[dict], str]:
     prompt = PROMPT + chunk + PROMPT_SUFFIX
-    raw, err = call_claude(prompt)
+    raw, err = claude_cli.call_claude(prompt)
     if err:
         return idx, [], err
     if not raw:
@@ -174,6 +86,10 @@ def apply_fixes(text: str, fixes: list[dict]) -> tuple[str, int, int]:
         find = fix.get("find")
         replace = fix.get("replace")
         if not isinstance(find, str) or not isinstance(replace, str) or not find:
+            skipped += 1
+            continue
+        # keeps the text's blocks lined up with clean.py's .blocks.json
+        if find.count("\n") != replace.count("\n"):
             skipped += 1
             continue
         if text.count(find) != 1:
@@ -198,9 +114,13 @@ def apply_fixes(text: str, fixes: list[dict]) -> tuple[str, int, int]:
     return new_text, len(accepted), skipped
 
 
-def main():
-    text = TARGET.read_text(encoding="utf-8")
-    chunks = split_into_chunks(text)
+def main() -> int:
+    if len(sys.argv) != 2:
+        sys.stderr.write("usage: review.py <text-file>\n")
+        return 2
+    target = Path(sys.argv[1])
+    text = target.read_text(encoding="utf-8")
+    chunks = textblocks.split_into_chunks(text)
     print(f"==> AI review pass ({len(text):,} chars in {len(chunks)} chunks)")
 
     all_fixes: list[dict] = []
@@ -221,16 +141,17 @@ def main():
 
     if not all_fixes:
         print(f"    no fixes applied (failures: {fail_count})")
-        return
+        return 0
 
     new_text, applied, skipped = apply_fixes(text, all_fixes)
     if applied == 0:
         print(f"    {len(all_fixes)} fixes proposed, all skipped (couldn't match uniquely)")
-        return
+        return 0
 
-    TARGET.write_text(new_text, encoding="utf-8")
+    target.write_text(new_text, encoding="utf-8")
     print(f"    applied {applied} fixes ({skipped} skipped, {fail_count} chunk failures)")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

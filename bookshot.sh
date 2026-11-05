@@ -6,10 +6,19 @@
 #
 # Usage:
 #   bookshot.sh <input-folder> [output-file] [--no-split] [--keep-temp] [--review]
+#                                             [--docx] [--emphasis] [--notes]
 #
 #   --review additionally runs an AI cleanup pass via Claude Code (`claude -p`)
 #   to fix obvious OCR typos. Uses your existing Claude Code subscription —
 #   no separate API billing.
+#
+#   --docx also writes a .docx. Speechify ignores SSML, markdown and document
+#   structure, but it does audibly stress bold/italic runs in a Word file.
+#   --emphasis adds an AI pass that picks which words to stress (implies --docx).
+#
+#   --notes writes the book as rich text (headings, paragraphs, lists read off
+#   the page photos) to a .html file and a new Apple Note. Speechify keeps the
+#   formatting of rich text pasted into it, e.g. copied from Notes.
 #
 # Requires: macOS (uses sips + Apple Vision via swift), python3.
 # --review additionally requires the Claude Code CLI (`claude`) on PATH.
@@ -18,13 +27,20 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: bookshot.sh <input-folder> [output-file] [--no-split] [--keep-temp] [--review]
+Usage: bookshot.sh <input-folder> [output-file] [--no-split] [--keep-temp]
+                   [--review] [--docx] [--emphasis] [--notes]
 
   <input-folder>   Folder containing page photos, sorted in reading order.
   [output-file]    Output .txt path. Default: <input-folder>/speechify.txt
   --no-split       Treat each photo as a single page (default: two-page spreads).
   --keep-temp      Keep the intermediate _book_tmp/ folder for inspection.
   --review         AI pass via Claude Code to fix OCR typos.
+  --docx           Also write a .docx alongside the .txt. Speechify stresses
+                   bold/italic runs in a Word file; it ignores everything else.
+  --emphasis       AI pass marking which words to stress. Implies --docx.
+  --notes          Also write the book as rich text: a .html file and a new
+                   Apple Note, with the headings and paragraphs from the photos.
+                   Copy from the note into Speechify to keep the formatting.
 EOF
 }
 
@@ -33,17 +49,29 @@ if [[ $# -lt 1 ]]; then
   exit 1
 fi
 
+# handle help before the first argument is claimed as the input folder
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
 INPUT_DIR="$1"; shift || true
 OUTPUT_FILE=""
 SPLIT_FLAG=""
 KEEP_TEMP=0
 REVIEW=0
+DOCX=0
+EMPHASIS=0
+NOTES=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-split)  SPLIT_FLAG="--no-split"; shift ;;
     --keep-temp) KEEP_TEMP=1; shift ;;
     --review)    REVIEW=1; shift ;;
+    --docx)      DOCX=1; shift ;;
+    --emphasis)  EMPHASIS=1; DOCX=1; shift ;;
+    --notes)     NOTES=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *)  OUTPUT_FILE="$1"; shift ;;
@@ -131,5 +159,32 @@ if [[ $REVIEW -eq 1 ]]; then
   fi
 fi
 
+if [[ $EMPHASIS -eq 1 ]]; then
+  # Writes a sidecar next to the .txt; docx_out.py picks it up automatically.
+  if ! python3 "$SCRIPT_DIR/emphasis.py" "$OUTPUT_FILE"; then
+    echo "    emphasis pass had errors — continuing without italics" >&2
+  fi
+fi
+
+DOCX_FILE=""
+if [[ $DOCX -eq 1 ]]; then
+  echo "==> writing .docx"
+  DOCX_FILE="${OUTPUT_FILE%.*}.docx"
+  python3 "$SCRIPT_DIR/docx_out.py" "$OUTPUT_FILE" "$DOCX_FILE"
+fi
+
+HTML_FILE=""
+if [[ $NOTES -eq 1 ]]; then
+  echo "==> writing rich text and creating an Apple Note"
+  HTML_FILE="${OUTPUT_FILE%.*}.html"
+  if ! python3 "$SCRIPT_DIR/rich_out.py" "$OUTPUT_FILE" --notes; then
+    echo "    Apple Notes step failed; the rich text is still in $HTML_FILE" >&2
+  fi
+fi
+
 echo ""
 echo "done. output: $OUTPUT_FILE"
+# `if`, not `[[ ]] &&`: as the last command, a false test would become the
+# script's exit status and make a good run look failed
+if [[ -n "$DOCX_FILE" ]]; then echo "            $DOCX_FILE"; fi
+if [[ -n "$HTML_FILE" ]]; then echo "            $HTML_FILE"; fi
