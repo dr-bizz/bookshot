@@ -12,13 +12,16 @@ The photo still shows it:
   in smaller type and repeats,
 - scraps of the facing page caught in the photo sit outside the block of text.
 
+- print from the other side of the sheet showing through is faint.
+
 ocr.swift writes one line per recognized piece of text, measured on the
 straightened page, as fractions of the page image (x left to right, y top to
-bottom), with the type size last:
+bottom), then the type size and how dark the ink is against the paper (0-1):
 
-    [x0 x1 top bottom size] text
+    [x0 x1 top bottom size ink] text
 
-The size may be missing (older raw files); the box height stands in for it.
+Size and ink may be missing (older raw files): the box height stands in for
+the size, and the piece is taken to be dark.
 Untagged lines (error notes, "===== name =====" page delimiters) pass through
 unchanged. Every delimiter starts a new page, and everything is measured per
 page, because each half of a two-page spread is cropped differently.
@@ -35,7 +38,7 @@ from typing import NamedTuple, Optional
 import textblocks
 
 NUM = r"(-?\d+\.\d+)"
-PIECE_RE = re.compile(rf"^\[{NUM} {NUM} {NUM} {NUM}(?: {NUM})?\] ?(.*)$")
+PIECE_RE = re.compile(rf"^\[{NUM} {NUM} {NUM} {NUM}(?: {NUM})?(?: {NUM})?\] ?(.*)$")
 
 # Margins are judged against nearby lines rather than the whole page, after
 # taking out the page's overall slant (see _slant), so a handheld photo where
@@ -71,6 +74,10 @@ EDGE = 0.01
 EDGE_SCRAP_WIDTH = 0.08
 # A single letter this many times the page's typical type size is a drop cap.
 DROP_CAP_RATIO = 1.8
+# Ink this faint against the paper is print from the other side of the sheet
+# showing through. Measured on a real book: show-through 0.05; the faintest
+# real text, small gray running headers, 0.24 and up; body text 0.3-0.7.
+SHOW_THROUGH_MAX = 0.12
 
 # A private-use character: OCR never produces one, and unlike the ASCII control
 # characters Python doesn't treat it as whitespace or a line break, so it
@@ -85,6 +92,7 @@ class Piece(NamedTuple):
     top: float
     bottom: float
     size: float
+    ink: float = 1.0
 
 
 class Row(NamedTuple):
@@ -166,9 +174,10 @@ def _edge_scrap(p: Piece) -> bool:
 
 
 def drop_strays(pieces: list[Piece]) -> list[Piece]:
-    """Drop scraps of the facing page: slivers at the photo's edge, and
-    pieces lying wholly outside the block of text."""
-    pieces = [p for p in pieces if not _edge_scrap(p)]
+    """Drop what isn't this page's text: show-through from the other side of
+    the sheet, slivers of the facing page at the photo's edge, and pieces
+    lying wholly outside the block of text."""
+    pieces = [p for p in pieces if p.ink > SHOW_THROUGH_MAX and not _edge_scrap(p)]
     block = _text_block(pieces)
     if block is None:
         return pieces
@@ -327,10 +336,11 @@ def to_lines(raw: str) -> list[str]:
     for line in raw.splitlines():
         m = PIECE_RE.match(line)
         if m:
-            x0, x1, top, bottom, size, text = m.groups()
+            x0, x1, top, bottom, size, ink, text = m.groups()
             top, bottom = float(top), float(bottom)
             piece = Piece(text, float(x0), float(x1), top, bottom,
-                          float(size) if size else bottom - top)
+                          float(size) if size else bottom - top,
+                          float(ink) if ink else 1.0)
             if segments and isinstance(segments[-1], list):
                 segments[-1].append(piece)
             else:

@@ -185,6 +185,28 @@ class TestStrayFragments(unittest.TestCase):
         self.assertEqual(layout.to_lines(raw), ["a real line of text cut off at the edge"])
 
 
+class TestShowThrough(unittest.TestCase):
+    # print from the other side of the sheet, seen through the paper: a
+    # faint mirror image that OCR reads as gibberish like "₴180ng"
+
+    def test_faint_piece_is_dropped(self):
+        raw = "\n".join(body() + ["[0.4541 0.6740 0.2621 0.2884 0.0263 0.0510] ₴180ng"])
+        self.assertNotIn("₴180ng", " ".join(layout.to_lines(raw)))
+
+    def test_dark_piece_is_kept(self):
+        raw = "[0.3120 0.5647 0.1734 0.2073 0.0257 0.4275] THE ROPES"
+        self.assertEqual(text_of(layout.to_lines(raw)), ["THE ROPES"])
+
+    def test_light_gray_running_header_is_kept_as_text(self):
+        # the faintest real text in a measured book: small gray headers
+        raw = "[0.3966 0.4765 0.0803 0.0973 0.0132 0.2353] Regrouping"
+        self.assertEqual(layout.to_lines(raw), ["Regrouping"])
+
+    def test_piece_without_an_ink_reading_is_kept(self):
+        # older raw files have no ink measurement
+        self.assertEqual(layout.to_lines(tag("THE ROPES", 0.31, 0.56, 0.17)), ["THE ROPES"])
+
+
 class TestDropCaps(unittest.TestCase):
     # a big initial letter spanning the first few lines of a chapter
 

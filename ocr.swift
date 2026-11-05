@@ -9,6 +9,48 @@ struct Piece {
     let text: String
     let x0: CGFloat, x1: CGFloat, top: CGFloat, bottom: CGFloat
     let size: CGFloat  // line height along its own slant, fraction of image height
+    let ink: CGFloat   // how much darker the ink is than the paper, 0-1
+}
+
+// The image as 8-bit gray, one byte per pixel, top row first.
+struct Gray {
+    let pixels: [UInt8]
+    let width: Int, height: Int
+
+    init(_ image: CGImage) {
+        width = image.width
+        height = image.height
+        var px = [UInt8](repeating: 255, count: width * height)
+        let ctx = CGContext(data: &px, width: width, height: height, bitsPerComponent: 8,
+                            bytesPerRow: width, space: CGColorSpaceCreateDeviceGray(),
+                            bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        pixels = px
+    }
+
+    // How dark the ink in a Vision box is against the paper around it: the
+    // paper (90th percentile) minus the darkest ink (1st percentile). Print
+    // from the other side of the sheet showing through measures about 0.05;
+    // real text 0.24 and up. Local to the box, so shadows don't matter.
+    func ink(in box: CGRect) -> CGFloat {
+        let x0 = max(0, Int(box.minX * CGFloat(width))), x1 = min(width, Int(box.maxX * CGFloat(width)))
+        let y0 = max(0, Int((1 - box.maxY) * CGFloat(height))), y1 = min(height, Int((1 - box.minY) * CGFloat(height)))
+        guard x1 > x0, y1 > y0 else { return 1 }
+        var histogram = [Int](repeating: 0, count: 256)
+        for y in y0..<y1 {
+            for x in x0..<x1 { histogram[Int(pixels[y * width + x])] += 1 }
+        }
+        let total = (x1 - x0) * (y1 - y0)
+        func percentile(_ q: Double) -> Int {
+            var seen = 0
+            for (level, count) in histogram.enumerated() {
+                seen += count
+                if Double(seen) >= q * Double(total) { return level }
+            }
+            return 255
+        }
+        return CGFloat(percentile(0.9) - percentile(0.01)) / 255
+    }
 }
 
 func median(_ xs: [CGFloat]) -> CGFloat? {
@@ -23,7 +65,8 @@ func median(_ xs: [CGFloat]) -> CGFloat? {
 // line by line. Rotating every corner back by the page's own text angle gives
 // layout.py a square-on page to measure: indents, gaps, type size, and the
 // top-to-bottom order of the lines.
-func pieces(from observations: [VNRecognizedTextObservation], width w: CGFloat, height h: CGFloat) -> [Piece] {
+func pieces(from observations: [VNRecognizedTextObservation], in gray: Gray) -> [Piece] {
+    let w = CGFloat(gray.width), h = CGFloat(gray.height)
     func px(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * w, y: p.y * h) }
 
     // the angle of real text lines, not stray fragments from the facing page
@@ -50,7 +93,8 @@ func pieces(from observations: [VNRecognizedTextObservation], width w: CGFloat, 
             x1: corners.map { $0.x }.max()!,
             top: 1.0 - corners.map { $0.y }.max()!,
             bottom: 1.0 - corners.map { $0.y }.min()!,
-            size: (left + right) / 2 / h
+            size: (left + right) / 2 / h,
+            ink: gray.ink(in: o.boundingBox)
         )
     }
 }
@@ -67,13 +111,13 @@ func recognize(in ci: CGImage) -> String {
         return "[ERROR: \(error.localizedDescription)]"
     }
     guard let observations = request.results else { return "" }
-    let found = pieces(from: observations, width: CGFloat(ci.width), height: CGFloat(ci.height))
+    let found = pieces(from: observations, in: Gray(ci))
     // One line per piece, tagged with its box and type size. layout.py groups
     // pieces into lines and reads paragraphs, headings and running headers
     // off the geometry.
     return found
         .sorted { ($0.top, $0.x0) < ($1.top, $1.x0) }
-        .map { String(format: "[%.4f %.4f %.4f %.4f %.4f] ", $0.x0, $0.x1, $0.top, $0.bottom, $0.size) + $0.text }
+        .map { String(format: "[%.4f %.4f %.4f %.4f %.4f %.4f] ", $0.x0, $0.x1, $0.top, $0.bottom, $0.size, $0.ink) + $0.text }
         .joined(separator: "\n")
 }
 
