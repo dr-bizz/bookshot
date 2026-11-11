@@ -16,9 +16,9 @@ photos/ → sips (HEIC→JPG) → Apple Vision OCR → page layout → reflow & 
 `bookshot.sh` is the orchestrator. Behind it:
 
 1. **`sips`** converts every HEIC/JPG/JPEG/PNG in the input folder to a normalized JPG.
-2. **`ocr.swift`** runs Apple Vision text recognition on each image. Two-page spreads are split down the middle. Every piece of text is written out with its box and type size, measured after rotating the page level, so a photo taken at an angle measures like a square-on one.
-3. **`layout.py`** reads the page's structure off those boxes: paragraph breaks (indented first lines, short last lines, extra space), headings (bigger type), running headers (small repeated title at the top of the page, dropped), scraps of the facing page caught in the photo (dropped), and print from the other side of the sheet showing through the paper (dropped, by how faint its ink is).
-4. **`clean.py`** reflows the text. It strips page numbers, joins wrapped lines into single-line paragraphs, keeps headings and bullet items as blocks of their own, and puts a blank line after every block. It also puts back a chapter's first letter when a big decorative drop cap kept OCR from reading it ("fter twenty years" → "After twenty years"; see `dropcap.py`). It also writes `speechify.txt.blocks.json`, the kind of each block (title, heading, paragraph, bullet).
+2. **`ocr.swift`** runs Apple Vision text recognition on each image. Two-page spreads are split at the spine: a quick first pass finds the empty gap between the two pages' text, so a photo that isn't centered on the spine doesn't slice the end off every line of one page ("persor" for "personal"). With no clear gap it falls back to the middle of the photo. Every piece of text is written out with its box and type size, measured after rotating the page level, so a photo taken at an angle measures like a square-on one.
+3. **`layout.py`** reads the page's structure off those boxes: paragraph breaks (indented first lines, short last lines, extra space), headings (bigger type, or capitals a little bigger than the body; a title set on two or more lines is joined into one), running headers (small title at the top of the page that repeats or names a chapter, allowing a misread letter, dropped), page numbers (dropped, even misread as "5l"), pull quotes (a box beside the text repeating a sentence from the page, dropped), diagram labels (short scattered pieces, dropped), scraps of the facing page caught in the photo (dropped), and print from the other side of the sheet showing through the paper (dropped, by how faint its ink is).
+4. **`clean.py`** reflows the text. It first puts back quote marks Vision misread: on macOS 27 a closing quote over its period (`you.”`) often comes out as Vietnamese letters ("youạẠạ"), which also hid the end of the sentence and ran one speaker's paragraph into the next (see `quotemarks.py`). It strips page numbers, joins wrapped lines into single-line paragraphs, keeps headings, sub-headings and bullet items as blocks of their own, and puts a blank line after every block. It also puts back a chapter's first letter when a big decorative drop cap kept OCR from reading it ("fter twenty years" → "After twenty years"; see `dropcap.py`), then fixes words Vision misreads the same way every time ("tocus" → "focus", "T'm" → "I'm", "work-and" → "work—and"; see `ocrfix.py`). It also writes `speechify.txt.blocks.json`, the kind of each block (title, heading, paragraph, bullet).
 5. **`review.py`** *(optional, `--review`)* splits the output by chapter, asks `claude -p` for a JSON list of `{find, replace}` OCR fixes, and applies the ones that match uniquely.
 6. **`emphasis.py`** *(optional, `--emphasis`)* asks `claude -p` which words a narrator would lean on, and writes them to a `.emphasis.json` sidecar.
 7. **`docx_out.py`** *(optional, `--docx`)* writes a `.docx` where those spans are italic runs.
@@ -106,17 +106,20 @@ alias bookshot="$HOME/path/to/bookshot/bookshot.sh"
 
 ## How to take the photos
 
-- **Two-page spreads** are easier — open the book flat, photograph the whole spread, move on. The script splits each photo down the middle.
+- **Two-page spreads** are easier — open the book flat, photograph the whole spread, move on. The script splits each photo at the spine, found from the gap between the two pages' text.
 - Sort the photos in the order they were taken (iPhone's default filename order works).
-- Make sure the spine is roughly centered so the split lines up. Slight tilt is fine.
+- Keep the spine near the middle of the photo (within about a fifth of the width either way) so the split can find it. Slight tilt is fine.
 - Avoid fingers, glare, and shadows on the text. Vision is robust but not magic.
 
 ## Limitations
 
 - Designed for prose books with chapter headings, paragraphs, and bullet lists. Novels with stylized typography or textbooks with multi-column layouts may produce mixed-up output.
 - The single OCR pass on a half-spread reads top-to-bottom in a single column. Side-by-side text blocks within one page will interleave (rare in trade paperbacks).
-- Headings are found by type size, so a heading set in body-size bold type isn't recognized as one; short unpunctuated lines still get a block of their own. In an Apple Note, headings show as bold, larger text: Notes turns heading tags into that.
+- Headings are found by type size, so a heading set in body-size bold type isn't recognized as one; short unpunctuated lines still get a block of their own, and so does a short title-case line the page sets apart (a sub-heading). A sub-heading run into its paragraph on the same line stays glued to it. In an Apple Note, headings show as bold, larger text: Notes turns heading tags into that.
 - Paragraph breaks are only kept after a finished sentence, so a misread on a noisy page can't cut a sentence in two. A paragraph that ends without `.`, `!` or `?` may run into the next one.
+- A quote mark Vision drops entirely, with nothing left in its place, stays missing. Where a misread quote's stop can't be seen, `?` or `.` is chosen from how the sentence starts ("What did he...", "Do you..."), so a question worded like a statement gets a period.
+- A misread word is only fixed when one look-alike swap (t read for f, i for l, rn for m, italic b for h...) makes a word the book itself uses elsewhere, or, for a long word read with t for f, a dictionary word ("transtorming"). A real word that is rare in the book ("tor", "bumble") changes only when the book pairs the common word with the same neighbor ("for your", "humble, hungry"). So a word misread two ways, or one the book uses only once, stays as read. A lone "1" becomes "I" only where a clause starts and before a word that follows I ("And 1 did"), so "1 cup" stays.
+- Pull quotes are found only when set beside the text; one set full width between paragraphs stays. A diagram with fewer than five lines of labels stays.
 - A running header is only dropped once it repeats or matches a chapter title, so on a short run of photos it may stay.
 - A letter lost to a drop cap is chosen from the book's own wording (which letter makes a word, or a name, that fits the words after it), so it's a well-informed guess, not a reading of the letter. When the book gives no way to choose ("ark": Bark or Dark?) the word is left as it is.
 - Line-break hyphens are resolved against the macOS system dictionary: if the joined form is a real word, the hyphen is dropped (`peo-\nple` → `people`); if both halves are real words but the joined form isn't, the hyphen is kept (`Personal-\nBest`, `self-\naware`). Edge cases with rare/coined words may guess wrong but read fine in TTS.
@@ -126,9 +129,11 @@ alias bookshot="$HOME/path/to/bookshot/bookshot.sh"
 | File | Purpose |
 |------|---------|
 | `bookshot.sh` | Orchestrates the pipeline |
-| `ocr.swift` | Apple Vision OCR with two-page split and portrait fallback |
+| `ocr.swift` | Apple Vision OCR with two-page split at the spine and portrait fallback |
 | `layout.py` | Reads paragraphs, headings, running headers, drop caps and stray scraps off the page geometry |
 | `dropcap.py` | Puts back a chapter's first letter when a drop cap kept OCR from reading it |
+| `quotemarks.py` | Puts back quote marks Vision reads as Vietnamese letters (`company."` → "companyiạẠạ") |
+| `ocrfix.py` | Fixes words Vision misreads ("tocus", "T'm"), and hyphens read for dashes, using the book's own words as the judge |
 | `clean.py` | Reflows raw OCR into Speechify-ready paragraphs and records each block's kind |
 | `textblocks.py` | Shared line classifiers and chapter chunking |
 | `claude_cli.py` | Shared `claude -p` plumbing and JSON-array parsing |
