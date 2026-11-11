@@ -121,6 +121,70 @@ func recognize(in ci: CGImage) -> String {
         .joined(separator: "\n")
 }
 
+// Where to cut a two-page spread. The middle of the photo is only where the
+// spine is if the photo was framed square on it; off by a few letters, the
+// cut slices the end off every line of one page ("persor" for "personal")
+// and the slivers land on the facing half, where layout.py drops them as
+// scraps. So cut in the gap between the two pages' text instead: find the
+// text on the whole spread with a quick pass, and look near the middle for a
+// band of columns that no line crosses.
+// How far either side of the middle the spine may be, fraction of the width.
+let GUTTER_SEARCH = 0.2
+// A band narrower than this is a gap between words, not the gutter.
+let GUTTER_MIN = 0.01
+// The cut keeps this far from the text on either side, so a letter Vision's
+// box left out isn't sliced.
+let GUTTER_CLEAR = 0.02
+// Pieces this faint are print from the other side of the sheet (layout.py's
+// SHOW_THROUGH_MAX): they may lie across the gutter, and aren't this page's.
+let SHOW_THROUGH_MAX: CGFloat = 0.12
+
+// The x to cut at, in pixels: the middle of the photo when that's clear of
+// the text, else the nearest point in the gap that is. nil when no gap is
+// found (one page photographed in landscape, or the photo is too far off).
+func gutter(of image: CGImage) -> Int? {
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .fast
+    request.usesLanguageCorrection = false
+    request.recognitionLanguages = ["en-US"]
+    let handler = VNImageRequestHandler(cgImage: image, options: [:])
+    guard (try? handler.perform([request])) != nil, let observations = request.results else { return nil }
+
+    let gray = Gray(image)
+    let w = image.width, h = image.height
+    var covered = [Bool](repeating: false, count: w)
+    for o in observations {
+        let box = o.boundingBox
+        if gray.ink(in: box) <= SHOW_THROUGH_MAX { continue }
+        // a tall thin stroke is the spine's shadow or a page edge read as
+        // "I" or "|", not a line of text
+        if box.height * CGFloat(h) > 3 * box.width * CGFloat(w) { continue }
+        let x0 = max(0, Int(box.minX * CGFloat(w))), x1 = min(w, Int((box.maxX * CGFloat(w)).rounded(.up)))
+        if x1 > x0 { for x in x0..<x1 { covered[x] = true } }
+    }
+
+    // every empty band that reaches into the search window, at its full width
+    let mid = w / 2
+    let reach = Int(GUTTER_SEARCH * Double(w))
+    var bands: [(lo: Int, hi: Int)] = []
+    var x = mid - reach
+    while x < mid + reach {
+        if covered[x] { x += 1; continue }
+        var lo = x, hi = x
+        while lo > 0 && !covered[lo - 1] { lo -= 1 }
+        while hi < w && !covered[hi] { hi += 1 }
+        bands.append((lo, hi))
+        x = hi
+    }
+    // The gutter is the band at (or nearest) the middle. Not the widest: a
+    // page of short lines leaves a wide empty strip inside its own margin.
+    func away(_ b: (lo: Int, hi: Int)) -> Int { max(b.lo - mid, mid - b.hi, 0) }
+    let wide = bands.filter { $0.hi - $0.lo >= Int(GUTTER_MIN * Double(w)) }
+    guard let band = wide.min(by: { (away($0), $1.hi - $1.lo) < (away($1), $0.hi - $0.lo) }) else { return nil }
+    let clear = min(Int(GUTTER_CLEAR * Double(w)), (band.hi - band.lo) / 2)
+    return min(max(mid, band.lo + clear), band.hi - clear)
+}
+
 func ocr(imagePath: String, splitSpread: Bool) -> String {
     let url = URL(fileURLWithPath: imagePath)
     guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
@@ -141,7 +205,12 @@ func ocr(imagePath: String, splitSpread: Bool) -> String {
         return recognize(in: cgImage)
     }
 
-    let midX = width / 2
+    let midX = gutter(of: cgImage) ?? width / 2
+    if midX != width / 2 {
+        FileHandle.standardError.write(
+            "note: \(imagePath): spine is off center; cutting at x=\(midX) of \(width)\n"
+                .data(using: .utf8)!)
+    }
     guard let leftImage = cgImage.cropping(to: CGRect(x: 0, y: 0, width: midX, height: height)),
           let rightImage = cgImage.cropping(to: CGRect(x: midX, y: 0, width: width - midX, height: height)) else {
         return recognize(in: cgImage)
