@@ -12,6 +12,7 @@ small and minimizes content-filter exposure.
 Each fix is applied only when its `find` string matches exactly once.
 """
 import concurrent.futures
+import re
 import sys
 from pathlib import Path
 
@@ -35,13 +36,44 @@ WHAT TO FIX
 - Misread characters ("naneuver" -> "maneuver", "s best" -> "is best", "avorite" -> "favorite").
 - Garbled words clearly produced by OCR.
 - Two words run together that should be separate.
+- Missing or wrong quotation marks around dialogue. OCR often drops a quote
+  mark or reads it as another character: "?", "!", "*", "'", "i" or "i." where
+  a closing or opening " belongs. A stray "i" stuck to the last word, even a
+  name, is that mark, not a letter of the word ("about Terry Pascali" ending
+  a question -> "about Terry Pascal?\"").
+  ("projects?\n" ending a line of dialogue -> "projects.\"",
+   "*What's up, boss? Bobby's voice" -> "\"What's up, boss?\" Bobby's voice",
+   "It's fantastic news, Bob answered" -> "It's fantastic news,\" Bob answered").
+- A hyphen used where the book has a dash between two phrases
+  ("careful-almost paranoid-about" -> "careful—almost paranoid—about",
+   "Dani- -for being" -> "Dani—for being"). Leave real compound words alone
+  ("self-assessment", "mess-maker", "fourth-quarter", "team-building").
+- The end mark of a line of dialogue. OCR often reads the "?" before a
+  closing quote as "." and the other way round: use "?" where the quoted
+  sentence is plainly a question ("How about this afternoon instead." ->
+  "How about this afternoon instead?") and "." where it is plainly a
+  statement. A dash before a closing quote ("arrogant—\" He seemed") belongs
+  only where the speaker is cut off mid-sentence; after a finished sentence
+  it is a misread period.
+- A sentence that starts with a lowercase letter right after a period
+  ("smart. when every" -> "smart. When every"). A quote that follows a
+  comma may go on lowercase; leave it.
 
 WHAT NOT TO FIX
+- Do NOT replace a real word that makes sense where it stands with another
+  real word, even one you'd expect more ("civic stuff" stays). Fix a word
+  only when it isn't a word, or plainly doesn't fit the sentence.
 - Do NOT rewrite passages.
 - Do NOT change wording, tone, or meaning.
 - Do NOT remove or add information.
-- Do NOT correct grammar, spelling that's intentional, or capitalization choices.
-- Do NOT touch ALL-CAPS headings or proper names.
+- Do NOT correct grammar, spelling that's intentional, or other capitalization choices.
+- Do NOT touch proper names unless a letter is plainly misread ("Matthev" -> "Matthew").
+- In ALL-CAPS headings, fix only a missing space or a dash; never reword them.
+
+LINE BREAKS
+Never add, remove or move a line break. Each line is one paragraph and must
+stay one paragraph, even when it looks like two paragraphs were run together:
+fix the quote marks and punctuation in place on the same line.
 
 UNIQUENESS RULE
 Each `find` must appear exactly once in the document. Include surrounding
@@ -77,6 +109,27 @@ def review_chunk(idx: int, total: int, chunk: str) -> tuple[int, list[dict], str
     return idx, fixes, "ok"
 
 
+def split_long_chunks(chunks: list[str], budget: int = textblocks.CHUNK_TARGET_CHARS) -> list[str]:
+    """Cut any chunk far over budget at paragraph breaks. A long chapter with
+    no ALL-CAPS heading inside it (39k chars in one test book) otherwise goes
+    out as one prompt, and the model finds far fewer typos in it."""
+    out: list[str] = []
+    for chunk in chunks:
+        if len(chunk) <= budget * 3 // 2:
+            out.append(chunk)
+            continue
+        piece = ""
+        for para in chunk.split("\n\n"):
+            if piece and len(piece) + len(para) + 2 > budget:
+                out.append(piece)
+                piece = para
+            else:
+                piece = f"{piece}\n\n{para}" if piece else para
+        if piece:
+            out.append(piece)
+    return out
+
+
 def apply_fixes(text: str, fixes: list[dict]) -> tuple[str, int, int]:
     """Applies all fixes against the ORIGINAL text. Each fix's `find` must
     occur exactly once. Overlapping edits are dropped (later fix loses)."""
@@ -88,6 +141,10 @@ def apply_fixes(text: str, fixes: list[dict]) -> tuple[str, int, int]:
         if not isinstance(find, str) or not isinstance(replace, str) or not find:
             skipped += 1
             continue
+        # A fix inside one paragraph that also splits it (to undo a merged
+        # paragraph) still carries a real typo fix: keep the fix, drop the split.
+        if "\n" not in find and "\n" in replace:
+            replace = re.sub(r"\s*\n+\s*", " ", replace)
         # keeps the text's blocks lined up with clean.py's .blocks.json
         if find.count("\n") != replace.count("\n"):
             skipped += 1
@@ -120,7 +177,7 @@ def main() -> int:
         return 2
     target = Path(sys.argv[1])
     text = target.read_text(encoding="utf-8")
-    chunks = textblocks.split_into_chunks(text)
+    chunks = split_long_chunks(textblocks.split_into_chunks(text))
     print(f"==> AI review pass ({len(text):,} chars in {len(chunks)} chunks)")
 
     all_fixes: list[dict] = []

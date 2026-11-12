@@ -38,6 +38,7 @@ from difflib import SequenceMatcher
 from statistics import median
 from typing import NamedTuple, Optional
 
+import quotemarks
 import textblocks
 
 NUM = r"(-?\d+\.\d+)"
@@ -57,6 +58,16 @@ MARGIN_QUANTILE = 0.25
 # how far right of the sign the text wrapped under it hangs, of the text width.
 BULLET_START = re.compile(r"\s*(?:[•○◦●·▪■*\-–]|o(?=\s))\s")
 HANG_MAX = 0.1
+# A list with a hanging indent and no bullet signs: this many wrapped lines
+# on the page make it one, and lines within this many rows of one are items.
+HANG_LIST_MIN = 2
+HANG_LIST_REACH = 4
+# ...and a one-line item stops at least this far (of the text width) short
+# of the right margin; the shortest measured, 8%
+ITEM_SHORT = 0.03
+SENTENCE_END_RE = re.compile(r"[.?!:][\"'”’)]*$")
+# What Vision makes of a quote mark on macOS 27 (see quotemarks.py)
+GARBLE = quotemarks.MARKS + "«»*¿"
 # Pieces whose middles are this close, as a fraction of the type size, are
 # level: on one line even if their boxes overlap a little.
 LEVEL = 0.25
@@ -123,9 +134,9 @@ HEADER_FUZZ = 0.85
 HEADER_FUZZ_MIN_LEN = 6
 
 # Page numbers: a short number alone on the page's last (or first) line, set
-# apart from the text. OCR reads "51" as "5l" and a dot beside the number as a
-# bullet ("• 150").
-FOLIO_RE = re.compile(r"[^\w]*[\dlIO|]{1,4}[^\w]*")
+# apart from the text. OCR reads "51" as "5l" or "5 l", "115" as "T15", and
+# a dot beside the number as a bullet ("• 150").
+FOLIO_RE = re.compile(r"[^\w]*[\dlIOT|](?: ?[\dlIOT|]){0,3}[^\w]*")
 FOLIO_MAX_WIDTH = 0.15
 
 # Two pieces on one line with a gap this wide (of the text width) between
@@ -147,6 +158,11 @@ LABEL_WORDS = 3
 FIGURE_MIN_LINES = 5
 FIGURE_MIN_PIECES = 6
 FIGURE_SPREAD = 0.25
+# A diagram with as few as this many lines of labels counts when they're set
+# far apart: this many lines' room each, from the text above to the text
+# below. A hand-drawn Venn diagram measured about 5; short lines of text, 1.
+FIGURE_SPARSE_LINES = 3
+FIGURE_SPACING = 3
 
 # A private-use character: OCR never produces one, and unlike the ASCII control
 # characters Python doesn't treat it as whitespace or a line break, so it
@@ -414,12 +430,21 @@ def drop_figures(pieces: list[Piece]) -> list[Piece]:
         return all(len(p.text.split()) <= LABEL_WORDS and p.size < HEADING_RATIO * typical
                    for p in line)
 
-    def figure(run):
-        if len(run) < FIGURE_MIN_LINES or sum(len(line) for line in run) < FIGURE_MIN_PIECES:
+    def figure(a, b):
+        run = lines[a:b]
+        if not run:
             return False
-        beside = any(b.x0 - a.x1 >= SIDE_GAP * width for line in run for a, b in zip(line, line[1:]))
+        beside = any(p.x0 - q.x1 >= SIDE_GAP * width for line in run for q, p in zip(line, line[1:]))
         starts = [p.x0 for line in run for p in line]
-        return beside or max(starts) - min(starts) >= FIGURE_SPREAD * width
+        scattered = beside or max(starts) - min(starts) >= FIGURE_SPREAD * width
+        if len(run) >= FIGURE_MIN_LINES and sum(len(line) for line in run) >= FIGURE_MIN_PIECES:
+            return scattered
+        # Fewer labels, but set far apart in the open space of a drawing: from
+        # the text above to the text below, several lines' room for each.
+        above = tops[a - 1] if a > 0 else tops[a] - pitch
+        below = tops[b] if b < len(lines) else tops[b - 1] + pitch
+        return (len(run) >= FIGURE_SPARSE_LINES and scattered
+                and below - above >= FIGURE_SPACING * pitch * (len(run) + 1))
 
     lines = _lines(pieces)
     if len(lines) < 2:
@@ -445,7 +470,7 @@ def drop_figures(pieces: list[Piece]) -> list[Piece]:
             a += 1
         while b > a and hugs(b - 1, b):
             b -= 1
-        if figure(lines[a:b]):
+        if figure(a, b):
             dropped.update(p for line in lines[a:b] for p in line)
         start = i + 1
     return [p for p in pieces if p not in dropped]
@@ -458,21 +483,28 @@ def _folio(row: Row, neighbor: Row, pitch: float, width: float) -> bool:
             and abs(row.top - neighbor.top) > GAP_FACTOR * pitch)
 
 
-def drop_folios(rows: list[Row]) -> list[Row]:
-    """Drop the page number from the page's last or first line, misread or
-    not ("5l", "• 150"), so it can't run into the text."""
+def folio_rows(rows: list[Row]) -> list[int]:
+    """Which rows are the page number: the page's last line, its first, or
+    neither. Misread or not ("5l", "• 150")."""
     if len(rows) < MIN_ROWS:
-        return rows
+        return []
     block = _text_block(rows)
     if block is None:
-        return rows
+        return []
     width = block[1] - block[0]
     pitch = median(rows[i].top - rows[i - 1].top for i in range(1, len(rows)))
-    if _folio(rows[-1], rows[-2], pitch, width):
-        rows = rows[:-1]
+    found = []
     if _folio(rows[0], rows[1], pitch, width):
-        rows = rows[1:]
-    return rows
+        found.append(0)
+    if _folio(rows[-1], rows[-2], pitch, width):
+        found.append(len(rows) - 1)
+    return found
+
+
+def drop_folios(rows: list[Row]) -> list[Row]:
+    """Drop the page number, so it can't run into the text."""
+    gone = set(folio_rows(rows))
+    return [r for i, r in enumerate(rows) if i not in gone]
 
 
 def group_rows(pieces: list[Piece]) -> list[Row]:
@@ -544,17 +576,64 @@ def _breaks(rows: list[Row]) -> tuple[bool, list[bool], bool]:
         else:
             item_left = None
 
-    def indented(i):
+    def set_in(i):
         # Measured from the margin, taken as the lower quarter of the nearby
         # left edges rather than their middle: in dialogue, most nearby lines
         # can be indented first lines (one-line replies), and near the page's
         # top or bottom the window only reaches one way, so their middle is
         # the indent itself.
-        if hanging[i]:
-            return False
         nearby = sorted(window(lefts, i))
         margin = nearby[int(MARGIN_QUANTILE * (len(nearby) - 1))]
         return lefts[i] - margin > INDENT_MIN * width
+
+    # A list set with a hanging indent and no bullet signs: each item at the
+    # margin, its wrapped lines indented under it. An indented line that
+    # starts lowercase, set in from a line at the margin whose sentence it
+    # carries on, is an item's wrap, not a paragraph's first line; with a few
+    # of them on the page, a line at the margin under a finished sentence
+    # nearby starts the next item. (Body text set right of the headings has
+    # no line at the margin to be set in from.)
+    def finished(i):
+        # a closing quote Vision garbled ("allạẠạ") likely ends one too
+        text = rows[i].text.rstrip()
+        return SENTENCE_END_RE.search(text) is not None or text[-1:] in GARBLE
+
+    def lowercase_start(i):
+        # past quote marks and garble: an opening quote read as "ạWell" or
+        # "iMaybe" starts a capitalized sentence
+        text = rows[i].text.lstrip().lstrip("\"'“‘" + GARBLE)
+        if text[:1] == "i" and text[1:2].isupper():
+            return False
+        return text[:1].islower()
+
+    ends = [r.x1 for r in rows]
+
+    def full_right(i):
+        # Where a full line ends nearby: the longest, since most lines of a
+        # list are short. As read, not straightened: the slant fitted to the
+        # line ends is thrown off by a list's ragged ones, and over a few
+        # lines a tilted photo moves them very little.
+        return max(window(ends, i))
+
+    wrap = [i > 0 and not hanging[i] and set_in(i) and not set_in(i - 1)
+            and lefts[i] - lefts[i - 1] > INDENT_MIN * width
+            and lowercase_start(i) and not finished(i - 1) for i in range(n)]
+    item = [False] * n
+    if sum(wrap) >= HANG_LIST_MIN:
+        for i in range(1, n):
+            if wrap[i]:
+                hanging[i] = True
+            # An item is followed by its wrap or the next item's, or follows
+            # a one-line item that stops short of the margin. A paragraph
+            # after the list runs its lines full width.
+            elif not set_in(i) and finished(i - 1) and (
+                    any(wrap[i + 1: i + HANG_LIST_REACH + 1])
+                    or (any(wrap[max(0, i - HANG_LIST_REACH): i])
+                        and full_right(i) - ends[i - 1] > ITEM_SHORT * width)):
+                item[i] = True
+
+    def indented(i):
+        return not hanging[i] and set_in(i)
 
     def short(i):
         return median(window(rights, i)) - rights[i] > SHORT_MIN * width
@@ -563,7 +642,7 @@ def _breaks(rows: list[Row]) -> tuple[bool, list[bool], bool]:
 
     for i in range(1, n):
         gap = pitch > 0 and rows[i].top - rows[i - 1].top > GAP_FACTOR * pitch
-        before[i] = indented(i) or short(i - 1) or gap
+        before[i] = indented(i) or short(i - 1) or gap or item[i]
 
     return indented(0), before, short(n - 1)
 
