@@ -9,8 +9,11 @@
 #                                             [--docx] [--emphasis] [--notes]
 #
 #   --review additionally runs an AI cleanup pass via Claude Code (`claude -p`)
-#   to fix obvious OCR typos. Uses your existing Claude Code subscription —
-#   no separate API billing.
+#   to fix OCR typos, quote marks and dashes the rules left. Uses your
+#   existing Claude Code subscription — no separate API billing.
+#
+#   At the end, any problems with the photos are listed: pages missing,
+#   repeated or out of order, and photos to retake (blurry, cut off).
 #
 #   --docx also writes a .docx. Speechify ignores SSML, markdown and document
 #   structure, but it does audibly stress bold/italic runs in a Word file.
@@ -97,6 +100,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# The photos' long side, in pixels, for OCR. At 4000 Vision read lines of a
+# curled page it skipped at 2000, and misread fewer quote marks and letters,
+# in about the same time; at 6000 it took several times as long.
+PHOTO_SIZE="${BOOKSHOT_PHOTO_SIZE:-4000}"
+
 echo "==> converting source photos to JPG in $TMP_DIR"
 shopt -s nullglob nocaseglob
 src_files=( "$INPUT_DIR"/*.heic "$INPUT_DIR"/*.jpg "$INPUT_DIR"/*.jpeg "$INPUT_DIR"/*.png )
@@ -115,7 +123,12 @@ for f in "${src_files[@]}"; do
   stem="${base%.*}"
   out="$TMP_DIR/${stem}.jpg"
   if [[ ! -f "$out" ]]; then
-    if ! sips -s format jpeg -Z 2000 "$f" --out "$out" > /dev/null; then
+    # shrink a bigger photo; never enlarge a smaller one (sips -Z would)
+    long_side="$(sips -g pixelWidth -g pixelHeight "$f" 2>/dev/null \
+      | awk '/pixel(Width|Height)/ { if ($2 > m) m = $2 } END { print m + 0 }')"
+    resize=()
+    if (( long_side == 0 || long_side > PHOTO_SIZE )); then resize=(-Z "$PHOTO_SIZE"); fi
+    if ! sips -s format jpeg ${resize[@]+"${resize[@]}"} "$f" --out "$out" > /dev/null; then
       echo "    failed to convert: $f" >&2
       exit 1
     fi
@@ -130,6 +143,21 @@ SWIFT_LOG="$TMP_DIR/_swift.log"
 : > "$RAW"
 : > "$SWIFT_LOG"
 
+# Build ocr.swift once and reuse it: `swift ocr.swift` compiles it again for
+# every photo, without optimizing (about 1.6 s a photo, against 0.5 s built).
+# Kept in the user's cache folder, named by the script's contents, so an
+# edited script is built afresh. If building fails, run it the old way.
+OCR=(swift "$SCRIPT_DIR/ocr.swift")
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/Library/Caches}/bookshot"
+OCR_BIN="$CACHE_DIR/ocr-$(shasum "$SCRIPT_DIR/ocr.swift" | cut -c1-12)"
+if [[ -x "$OCR_BIN" ]]; then
+  OCR=("$OCR_BIN")
+elif mkdir -p "$CACHE_DIR" 2>/dev/null \
+    && swiftc -O "$SCRIPT_DIR/ocr.swift" -o "$OCR_BIN.tmp" 2>>"$SWIFT_LOG" \
+    && mv "$OCR_BIN.tmp" "$OCR_BIN"; then
+  OCR=("$OCR_BIN")
+fi
+
 # natural-sort the converted jpgs so page2 < page10
 jpgs=()
 while IFS= read -r line; do
@@ -142,7 +170,7 @@ for f in "${jpgs[@]}"; do
   printf "\r    page %d/%d" "$i" "$count"
   base="$(basename "$f")"
   echo "===== $base =====" >> "$RAW"
-  if ! swift "$SCRIPT_DIR/ocr.swift" "$f" $SPLIT_FLAG >> "$RAW" 2>>"$SWIFT_LOG"; then
+  if ! "${OCR[@]}" "$f" $SPLIT_FLAG >> "$RAW" 2>>"$SWIFT_LOG"; then
     echo ""
     echo "    OCR failed on $base — see $SWIFT_LOG" >&2
     exit 1
@@ -151,7 +179,9 @@ done
 echo ""
 
 echo "==> cleaning up text for Speechify"
-python3 "$SCRIPT_DIR/clean.py" "$RAW" "$OUTPUT_FILE"
+# notes on the photos (pages missing, repeated, to retake), shown at the end
+PHOTO_NOTES="$TMP_DIR/_photo_notes.txt"
+python3 "$SCRIPT_DIR/clean.py" "$RAW" "$OUTPUT_FILE" "$PHOTO_NOTES"
 
 if [[ $REVIEW -eq 1 ]]; then
   if ! python3 "$SCRIPT_DIR/review.py" "$OUTPUT_FILE"; then
@@ -182,9 +212,18 @@ if [[ $NOTES -eq 1 ]]; then
   fi
 fi
 
+if [[ -s "$PHOTO_NOTES" ]]; then
+  echo ""
+  echo "==> check these photos"
+  sed 's/^/    /' "$PHOTO_NOTES"
+fi
+
 echo ""
 echo "done. output: $OUTPUT_FILE"
 # `if`, not `[[ ]] &&`: as the last command, a false test would become the
 # script's exit status and make a good run look failed
 if [[ -n "$DOCX_FILE" ]]; then echo "            $DOCX_FILE"; fi
 if [[ -n "$HTML_FILE" ]]; then echo "            $HTML_FILE"; fi
+if [[ $REVIEW -eq 0 ]] && command -v claude > /dev/null 2>&1; then
+  echo "tip: add --review to have Claude fix the typos and quote marks left (a few minutes)"
+fi

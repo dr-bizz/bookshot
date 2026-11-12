@@ -79,6 +79,11 @@ class TestInvertedQuestionMark(unittest.TestCase):
         self.assertEqual(ocrfix.fix_lost_capitals('a revelation. "¿Oh, and he hated it."', book()),
                          'a revelation. "Oh, and he hated it."')
 
+    def test_i_and_apostrophe_read_as_one_mark(self):
+        # `"I'm fifty-fifty` read as `"¿m fifty-fifty`
+        self.assertEqual(ocrfix.fix_lost_capitals('Jeff frowned. "¿m fifty-fifty. ¿ll see."', book()),
+                         'Jeff frowned. "I\'m fifty-fifty. I\'ll see."')
+
     def test_no_clear_letter_leaves_it(self):
         self.assertEqual(ocrfix.fix_lost_capitals('"¿e said so."', book()), '"¿e said so."')
 

@@ -248,6 +248,8 @@ def fix_lost_capitals(text: str, book: Book) -> str:
     word the book often has before the next word ("You know", "We are"),
     clearly more than any other letter; else the text is left as read."""
     text = re.sub(r'(?<=["“])¿(?=[A-Z])', "", text)
+    # "I'" as one mark: `"¿m fifty-fifty` for `"I'm fifty-fifty`
+    text = re.sub(r"(?<![A-Za-z])¿(?=(?:m|ll|ve|d)\b)", "I'", text)
 
     def lost(m: re.Match) -> str:
         rest = m.group(1)

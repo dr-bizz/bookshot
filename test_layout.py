@@ -26,7 +26,7 @@ def full(text):
 
 def breaks_before(lines):
     """Texts that directly follow a paragraph break."""
-    return [lines[i + 1] for i, line in enumerate(lines[:-1]) if line == ""]
+    return [lines[i + 1] for i, line in enumerate(lines[:-1]) if not line.strip()]
 
 
 class TestParagraphLines(unittest.TestCase):
@@ -109,6 +109,116 @@ class TestParagraphLines(unittest.TestCase):
         after = breaks_before(layout.paragraph_lines(rows))
         self.assertNotIn("Have at least two naps a day in the crib.", after)
         self.assertNotIn("adult lifestyle. Make sure that all the naps are not", after)
+
+    def test_list_with_a_hanging_indent_breaks_at_each_item(self):
+        # measured on a real page: a list of questions with no bullet signs,
+        # each at the margin and its wrapped lines indented under it
+        rows = [
+            layout.Row(text, x0, x1, top, bottom, 0.02)
+            for text, x0, x1, top, bottom in [
+                ("Does he do more than what is required in his own job?", 0.1229, 0.6664, 0.1520, 0.1768),
+                ('Does she have passion for the "mission" of the team?', 0.1224, 0.6441, 0.1746, 0.2016),
+                ("Does he feel a sense of personal responsibility for the overall", 0.1221, 0.7219, 0.2021, 0.2264),
+                ("success of the team?", 0.1585, 0.3716, 0.2215, 0.2445),
+                ("Is she willing to contribute to and think about work outside", 0.1213, 0.7277, 0.2502, 0.2726),
+                ("of office hours?", 0.1602, 0.3229, 0.2715, 0.2915),
+                ("Is he willing and eager to take on tedious and challenging", 0.1210, 0.7334, 0.2990, 0.3202),
+                ("tasks whenever necessary?", 0.1584, 0.4370, 0.3215, 0.3390),
+                ("Does she look for opportunities to contribute outside of her", 0.1226, 0.7394, 0.3475, 0.3663),
+                ("area of responsibility?", 0.1590, 0.4400, 0.3700, 0.3890),
+            ]
+        ]
+        after = breaks_before(layout.paragraph_lines(rows))
+        self.assertEqual(after, ['Does she have passion for the "mission" of the team?',
+                                 "Does he feel a sense of personal responsibility for the overall",
+                                 "Is she willing to contribute to and think about work outside",
+                                 "Is he willing and eager to take on tedious and challenging",
+                                 "Does she look for opportunities to contribute outside of her"])
+
+    def test_dialogue_with_garbled_quotes_is_not_a_list(self):
+        # an opening quote read as a lowercase letter ("ạWell", "iMaybe") after
+        # a line ending in a garbled closing quote: paragraphs, not list wraps
+        rows = page(
+            full("they had all been through that week, and nobody knew it allạẠạ"),
+            ("ạWell, I don't know what to say about that,\" Jeff said.", LEFT + 0.04, RIGHT),
+            full("It was clear to all of them that it would be a long night and they"),
+            full("would need to be patient with each other if they wanted any of itạẠạ"),
+            ("iMaybe we should just call it a night,\" Clare said finally.", LEFT + 0.04, RIGHT),
+            full("Nobody argued with her, and they packed up their things and left."),
+        )
+        after = breaks_before(layout.paragraph_lines(rows))
+        self.assertIn("ạWell, I don't know what to say about that,\" Jeff said.", after)
+        self.assertIn("iMaybe we should just call it a night,\" Clare said finally.", after)
+        self.assertNotIn("Nobody argued with her, and they packed up their things and left.", after)
+
+    def test_one_line_items_at_the_end_of_a_hanging_list(self):
+        # measured on a real page: the list's last items fit on one line each
+        rows = [
+            layout.Row(text, x0, x1, top, top + 0.02, 0.02)
+            for text, x0, x1, top in [
+                ("Does he genuinely compliment or praise teammates without", 0.2873, 0.9006, 0.6015),
+                ("hesitation?", 0.3213, 0.4270, 0.6237),
+                ("Does she easily admit when she makes a mistake?", 0.2818, 0.7862, 0.6506),
+                ("Is he willing to take on lower-level work for the good of the", 0.2790, 0.8973, 0.6779),
+                ("team?", 0.3153, 0.3772, 0.7013),
+                ("Does she gladly share credit for team accomplishments?", 0.2774, 0.8462, 0.7284),
+                ("Does he readily acknowledge his weaknesses?", 0.2748, 0.7456, 0.7565),
+                ("Does she offer and receive apologies graciously?", 0.2720, 0.7674, 0.7836),
+            ]
+        ]
+        after = breaks_before(layout.paragraph_lines(rows))
+        for item in ("Does she gladly share credit for team accomplishments?",
+                     "Does he readily acknowledge his weaknesses?",
+                     "Does she offer and receive apologies graciously?"):
+            self.assertIn(item, after)
+
+    def test_paragraph_after_a_hanging_list_stays_whole(self):
+        rows = [
+            layout.Row(text, x0, x1, top, top + 0.02, 0.02)
+            for text, x0, x1, top in [
+                ("Does he feel a sense of personal responsibility for the overall", 0.1221, 0.7219, 0.20),
+                ("success of the team?", 0.1585, 0.3716, 0.22),
+                ("Is she willing to contribute to and think about work outside", 0.1213, 0.7277, 0.24),
+                ("of office hours?", 0.1602, 0.3229, 0.26),
+                ("The desire for individual credit erodes the focus on success.", 0.1210, 0.7300, 0.28),
+                ("For more information about the model or anything else, go", 0.1215, 0.7310, 0.30),
+                ("to the website, where there is a great deal more to read.", 0.1212, 0.7290, 0.32),
+            ]
+        ]
+        after = breaks_before(layout.paragraph_lines(rows))
+        self.assertNotIn("For more information about the model or anything else, go", after)
+
+    def test_body_set_in_under_a_heading_is_not_a_list(self):
+        # measured on a real page: the body sits right of the headings, so
+        # its wrapped lines look set in; it's one paragraph and a bullet
+        rows = [
+            layout.Row(text, x0, x1, top, top + 0.02, 0.02)
+            for text, x0, x1, top in [
+                ("CRYING", 0.0263, 0.1592, 0.1135),
+                ('"I hate to hear my baby cry, for any reason at any time."', 0.0296, 0.6197, 0.1832),
+                ("Normal behavior", 0.0283, 0.2322, 0.2243),
+                ("Good parents have babies that cry sometimes. It", 0.1003, 0.6271, 0.2449),
+                ("is part of how babies communicate and learn.", 0.1010, 0.6035, 0.2631),
+                ("10-20 minute segments of crying especially in", 0.0865, 0.6219, 0.2833),
+                ("the evening is expected.", 0.1024, 0.3900, 0.3007),
+                ("• Starting at about 2-4 weeks of age, they can be", 0.0614, 0.6229, 0.3186),
+                ("fed, changed, and in the loving arms of a parent", 0.0975, 0.6324, 0.3396),
+                ("and cry like you are trying to pull off an arm.", 0.1049, 0.6091, 0.3587),
+                ("Babies have a startle reflex that comes from out", 0.0903, 0.6474, 0.3782),
+                ("of nowhere and they do not know how to control", 0.1065, 0.6612, 0.3972),
+            ]
+        ]
+        self.assertNotIn("Babies have a startle reflex that comes from out",
+                         breaks_before(layout.paragraph_lines(rows)))
+
+    def test_one_lowercase_indented_line_is_not_a_list(self):
+        # an indented line carrying on a sentence, once on a page, is noise
+        rows = page(
+            full("It was the start of a long day, and"), ("everyone knew it.", LEFT + 0.04, RIGHT),
+            full("They worked through lunch."), full("Nobody said a word."),
+            full("e"), full("f"),
+        )
+        self.assertNotIn("They worked through lunch.", breaks_before(layout.paragraph_lines(rows)))
 
     def test_short_last_line_on_a_page_ends_with_a_break(self):
         # the paragraph ends at the bottom of this page; the next page's first
@@ -510,6 +620,14 @@ class TestPageNumbers(unittest.TestCase):
     def test_misread_page_number_is_dropped(self):
         self.assertNotIn("5l", self._with_last("5l", 0.20 + 6 * PITCH + 0.03))
 
+    def test_page_number_misread_with_a_space_is_dropped(self):
+        # "31" read as "3 l" came through as a line of its own
+        self.assertNotIn("3 l", self._with_last("3 l", 0.20 + 6 * PITCH + 0.03))
+
+    def test_page_number_with_a_t_for_a_one_is_dropped(self):
+        # "115" read as "T15" came through in the middle of a sentence
+        self.assertNotIn("T15", self._with_last("T15", 0.20 + 6 * PITCH + 0.03))
+
     def test_page_number_with_a_stray_mark_is_dropped(self):
         self.assertNotIn("• 150", self._with_last("• 150", 0.20 + 6 * PITCH + 0.03))
 
@@ -616,6 +734,26 @@ class TestFigures(unittest.TestCase):
         lines = text_of(layout.to_lines(figure_page([("Three Virtues", 0.35, 0.65, 0.03)])))
         self.assertIn("Three Virtues", lines)
         self.assertNotIn("Ideal", lines)
+
+    def test_three_labels_far_apart_are_a_diagram(self):
+        # measured on a real page: a Venn diagram drawn by hand, three
+        # labels in a wide empty space between paragraphs
+        lines = body(4, start=0.05)
+        lines += [tag("HUMBLE", 0.2960, 0.3982, 0.2688, 0.0192), tag("HUNGRY", 0.8508, 0.9408, 0.2899, 0.0173),
+                  tag("SMART", 0.5765, 0.6758, 0.4848, 0.0177)]
+        lines += body(4, start=0.5359)
+        out = " ".join(text_of(layout.to_lines("\n".join(lines))))
+        for label in ("HUMBLE", "HUNGRY", "SMART"):
+            self.assertNotIn(label, out)
+
+    def test_three_short_lines_at_ordinary_spacing_are_kept(self):
+        # a short list or a few one-word replies, spread across the page
+        items = [("Humble", 0.15, 0.30), ("Hungry", 0.45, 0.60), ("Smart", 0.70, 0.85)]
+        lines = body(3, start=0.05) + [tag(t, x0, x1, 0.14 + i * PITCH) for i, (t, x0, x1) in enumerate(items)]
+        lines += body(3, start=0.14 + 3 * PITCH)
+        out = text_of(layout.to_lines("\n".join(lines)))
+        for t, _, _ in items:
+            self.assertIn(t, " ".join(out))
 
     def test_run_of_short_replies_is_kept(self):
         # short, but each starts at the paragraph indent like any text

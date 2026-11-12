@@ -17,15 +17,19 @@ from pathlib import Path
 import dropcap
 import layout
 import ocrfix
+import pagecheck
 import quotemarks
 import textblocks
 
-if len(sys.argv) != 3:
-    sys.stderr.write("usage: clean.py <raw-input> <output>\n")
+if len(sys.argv) not in (3, 4):
+    sys.stderr.write("usage: clean.py <raw-input> <output> [photo-notes-file]\n")
     sys.exit(2)
 
 RAW = Path(sys.argv[1])
 OUT = Path(sys.argv[2])
+# where to write notes on the photos (pages missing, repeated, to retake);
+# without it they're printed
+NOTES = Path(sys.argv[3]) if len(sys.argv) == 4 else None
 
 ROMAN_RE = re.compile(
     r"\s*(?=[MDCLXVI])M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})\s*",
@@ -167,6 +171,9 @@ HEADING_GUESS_MAX_LEN = 35
 # that doesn't end a sentence ("Pay Attention to References Who Don't Respond").
 SUBHEADING_MAX_LINES = 2
 SUBHEADING_MAX_LEN = 80
+# a line under a sub-heading with no break after it has at least this many
+# words: a line of prose, not a diagram's next label
+PROSE_MIN_WORDS = 5
 # words this short ("and", "but", "of") are lowercase in a title
 TITLE_WORD_MIN = 4
 TITLE_CASE_SHARE = 0.75
@@ -209,6 +216,61 @@ def is_subheading_block(block: list[str], following: str) -> bool:
     return reads_as_subheading(block) and not reads_as_subheading([following])
 
 
+def names_go_on(block: list[str], following: str) -> bool:
+    """A list of names wrapped over a line ("Tracy Noble, Amy Hubbard, Karen
+    Amador, Lynne" / "Andrews, and the rest of our team"), not a heading:
+    commas between the names, and the list going on past the break."""
+    first = following.split()[0] if following.split() else ""
+    return " ".join(block).count(",") >= 2 or first.endswith((",", ";"))
+
+
+def opens_sentence(s: str) -> bool:
+    """Starts like a sentence: a capital, or an opening quote."""
+    first = s.lstrip()[:1]
+    return first.isupper() or first in "\"“"
+
+
+# words a line can't end a paragraph on: the phrase goes on
+JOINING_WORDS = {"a", "an", "the", "to", "of", "and", "or", "but", "nor", "for", "with", "at",
+                 "by", "in", "on", "from", "as", "that", "than", "into", "about", "like", "my",
+                 "his", "her", "their", "our", "your", "its"}
+
+
+def ends_mid_phrase(s: str) -> bool:
+    """The line stops where a phrase can't: on a comma, a dash or a hyphen,
+    an opening bracket or quote, or a joining word ("talked it over with")."""
+    s = s.rstrip()
+    if not s or s[-1] in ",;-–—(“‘":
+        return True
+    last = s.split()[-1]
+    # a quote or bracket opened and not closed: `entitled "Typical`, "(See"
+    if s.count("(") > s.count(")") or (last[:1] in "\"“" and last[-1:] not in "\"”"):
+        return True
+    return last.lower() in JOINING_WORDS
+
+
+def carries_a_name(line: str, following: str) -> bool:
+    """A name or title wrapped over the break ("our Baby Food" /
+    "Introduction Calendar, a..."), or a diagram's labels ("Team" / "Player
+    Smart"), more likely than a paragraph that lost its stop: capitalized
+    words both sides, and the next line's capitals go on (or it carries on
+    a list of names, "Andrews, and..."). Not a sentence that opens after
+    a name ("at VBi" / "For a moment"), or a lone label after a short one
+    ("Total Humility Score" / "Hungry")."""
+    words, nxt = line.split(), following.split()
+    if not words or not nxt or not words[-1].lstrip("\"“'‘(")[:1].isupper() or not nxt[0][:1].isupper():
+        return False
+    if nxt[0].endswith((",", ";")):
+        return True
+    if len(nxt) >= 2:
+        return nxt[1][:1].isupper()
+    return sum(any(c.isalpha() for c in w) for w in words) >= LABEL_MAX_WORDS
+
+
+# a line of at most this many words before a one-word line is a label
+LABEL_MAX_WORDS = 5
+
+
 def continues_subheading(block: list[str], following: str) -> bool:
     """The next line is the rest of a sub-heading that wrapped
     ("... The Accidental" / "Mess-Maker"), not the paragraph under it."""
@@ -216,7 +278,10 @@ def continues_subheading(block: list[str], following: str) -> bool:
 
 # ---------- pre-clean ----------
 # strips the bounding-box tags and marks paragraph breaks as blank lines
-lines = layout.to_lines(RAW.read_text(encoding="utf-8"))
+# pages photographed twice are used once; what's wrong with the photos is
+# reported at the end
+raw, photo_notes = pagecheck.check(RAW.read_text(encoding="utf-8"))
+lines = layout.to_lines(raw)
 # quote marks and end punctuation Vision read as Vietnamese letters, so a
 # closing quote ends its sentence and the paragraph break after it holds
 lines = quotemarks.fix_lines(
@@ -296,6 +361,23 @@ for line in lines:
             pending_break = False
         elif is_subheading_block(block, s):
             honored = True
+    # A sub-heading set in body-size type, nearly full width, so layout saw
+    # no break after it ("Humble and Smart, but Not Hungry: The Lovable
+    # Slacker" / "People who are..."): it starts its block, reads as one,
+    # and the line under it is a line of prose (not more labels of a
+    # diagram, "Humble Hungry" / "The").
+    if (not pending_break and not honored and block and block[-1] == pre[-1]
+            and len(s.split()) >= PROSE_MIN_WORDS and not names_go_on(block, s)
+            and is_subheading_block(block, s)):
+        honored = True
+    # Vision often loses the stop and closing quote at a paragraph's end
+    # ("he was feeling", "okayi"). The break layout saw still holds where
+    # the next line opens a sentence and the line before doesn't stop
+    # mid-phrase; a misplaced break mid-sentence mostly lands before a
+    # lowercase word.
+    if (pending_break and not honored and pre and opens_sentence(s)
+            and not ends_mid_phrase(pre[-1]) and not carries_a_name(pre[-1], s)):
+        honored = True
     if pre and honored:
         pre.append("")
         block = []
@@ -508,3 +590,9 @@ OUT.write_text(final, encoding="utf-8")
 Path(str(OUT) + ".blocks.json").write_text(json.dumps([kind for kind, _ in blocks]), encoding="utf-8")
 print(f"wrote {OUT} ({len(final)} chars, {final.count(chr(10))} lines, "
       f"{initials} drop-cap letters put back, {len(fixed)} misread words fixed)")
+if NOTES is not None:
+    NOTES.write_text("".join(note + "\n" for note in photo_notes), encoding="utf-8")
+elif photo_notes:
+    print("check these photos:")
+    for note in photo_notes:
+        print(f"    {note}")

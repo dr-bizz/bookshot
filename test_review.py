@@ -62,6 +62,27 @@ class TestApplyFixes(unittest.TestCase):
         )
         self.assertEqual((text, applied, skipped), ("ENOUGH\n\nfter twenty years", 0, 1))
 
+    def test_fix_that_splits_one_paragraph_keeps_the_fix_but_not_the_split(self):
+        # the model often bundles a real typo fix with undoing a merged paragraph
+        text, applied, skipped = review.apply_fixes(
+            '"Are you going to be Okayi "If surgery goes well',
+            [{"find": "be Okayi \"If", "replace": "be Okay?\"\n\n\"If"}],
+        )
+        self.assertEqual(text, '"Are you going to be Okay?" "If surgery goes well')
+        self.assertEqual((applied, skipped), (1, 0))
+
     def test_non_string_fields_are_skipped(self):
         _, applied, skipped = review.apply_fixes("abc", [{"find": 42, "replace": "y"}])
         self.assertEqual((applied, skipped), (0, 1))
+
+
+class TestSplitLongChunks(unittest.TestCase):
+    def test_short_chunks_pass_through(self):
+        self.assertEqual(review.split_long_chunks(["a\n\nb"], budget=100), ["a\n\nb"])
+
+    def test_long_chunk_is_cut_at_paragraph_breaks(self):
+        paras = ["x" * 40] * 10
+        chunks = review.split_long_chunks(["\n\n".join(paras)], budget=100)
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(c) <= 100 for c in chunks))
+        self.assertEqual("\n\n".join(chunks), "\n\n".join(paras))

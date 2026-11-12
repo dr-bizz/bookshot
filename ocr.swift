@@ -17,13 +17,15 @@ struct Gray {
     let pixels: [UInt8]
     let width: Int, height: Int
 
-    init(_ image: CGImage) {
-        width = image.width
-        height = image.height
+    // scale < 1 shrinks the image as it's drawn
+    init(_ image: CGImage, scale: Double = 1) {
+        width = max(1, Int((Double(image.width) * scale).rounded()))
+        height = max(1, Int((Double(image.height) * scale).rounded()))
         var px = [UInt8](repeating: 255, count: width * height)
         let ctx = CGContext(data: &px, width: width, height: height, bitsPerComponent: 8,
                             bytesPerRow: width, space: CGColorSpaceCreateDeviceGray(),
                             bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+        ctx.interpolationQuality = .high
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
         pixels = px
     }
@@ -51,7 +53,48 @@ struct Gray {
         }
         return CGFloat(percentile(0.9) - percentile(0.01)) / 255
     }
+
+    // How blurry the page is, 0 (sharp) to 1: how little it changes when
+    // blurred again (Crete-Roffet's "blur effect"), across and down, over the
+    // middle of the page where the text is. Measured on photos of a book
+    // shrunk to BLUR_SIDE: 0.13-0.28 as taken; Vision starts dropping lines
+    // from about 0.55. A bigger image spreads each edge over more pixels and
+    // measures blurrier, so measure on the photo at that size.
+    // nil when there's too little detail to judge (a blank page with no
+    // paper grain): blurred again, it wouldn't change either.
+    func blur() -> Double? {
+        // it reads up to 5 px either side of the area it measures
+        let x0 = max(5, width * 15 / 100), x1 = width - x0, y0 = max(5, height * 15 / 100), y1 = height - y0
+        guard x1 - x0 > 10, y1 - y0 > 10 else { return nil }
+        var sharp = [0, 0], change = [0, 0]
+        pixels.withUnsafeBufferPointer { p in
+            for y in y0..<y1 {
+                let row = y * width
+                for x in x0..<x1 {
+                    let f = Int(p[row + x])
+                    // a step between neighbors, and the step after a 9-wide
+                    // box blur: (sum over x-4...x+4 minus over x-5...x+3) / 9
+                    let across = abs(f - Int(p[row + x - 1]))
+                    let acrossBlurred = abs(Int(p[row + x + 4]) - Int(p[row + x - 5]))
+                    let down = abs(f - Int(p[row + x - width]))
+                    let downBlurred = abs(Int(p[row + x + 4 * width]) - Int(p[row + x - 5 * width]))
+                    sharp[0] += across; change[0] += max(0, 9 * across - acrossBlurred)
+                    sharp[1] += down; change[1] += max(0, 9 * down - downBlurred)
+                }
+            }
+        }
+        let area = Double((x1 - x0) * (y1 - y0))
+        // a page of text measures 1.4 and up; blurred past reading, 0.4
+        guard Double(sharp[0] + sharp[1]) / 2 / area >= BLUR_MIN_DETAIL else { return nil }
+        return [0, 1].map { 1 - Double(change[$0]) / 9 / Double(max(1, sharp[$0])) }.max()!
+    }
 }
+
+// Below this mean step between neighboring pixels, a page is too smooth to
+// judge for blur.
+let BLUR_MIN_DETAIL = 0.25
+// The photo's long side, in pixels, when its blur is measured.
+let BLUR_SIDE = 2000.0
 
 func median(_ xs: [CGFloat]) -> CGFloat? {
     if xs.isEmpty { return nil }
@@ -99,7 +142,7 @@ func pieces(from observations: [VNRecognizedTextObservation], in gray: Gray) -> 
     }
 }
 
-func recognize(in ci: CGImage) -> String {
+func recognize(in ci: CGImage, gray: Gray) -> (text: String, lines: [VNRecognizedTextObservation]) {
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
     request.usesLanguageCorrection = true
@@ -108,17 +151,85 @@ func recognize(in ci: CGImage) -> String {
     do {
         try handler.perform([request])
     } catch {
-        return "[ERROR: \(error.localizedDescription)]"
+        return ("[ERROR: \(error.localizedDescription)]", [])
     }
-    guard let observations = request.results else { return "" }
-    let found = pieces(from: observations, in: Gray(ci))
+    guard let observations = request.results else { return ("", []) }
+    let found = pieces(from: observations, in: gray)
     // One line per piece, tagged with its box and type size. layout.py groups
     // pieces into lines and reads paragraphs, headings and running headers
     // off the geometry.
-    return found
+    return (found
         .sorted { ($0.top, $0.x0) < ($1.top, $1.x0) }
         .map { String(format: "[%.4f %.4f %.4f %.4f %.4f %.4f] ", $0.x0, $0.x1, $0.top, $0.bottom, $0.size, $0.ink) + $0.text }
-        .joined(separator: "\n")
+        .joined(separator: "\n"), observations)
+}
+
+// A page that runs off the photo's outer side. Vision drops the letters the
+// edge cuts through, and often the word they're in, so its lines just stop
+// short; but past where a line stops, the photo still shows letters. Their
+// ink lies thick across the middle of the line's height, where every letter
+// is, and thin at its top and bottom edges, where only tall letters and
+// tails reach; a page edge or the table past the page marks the strip from
+// top to bottom alike. Counts the lines with letters past their end.
+// Strips over CUT_REACH line heights wide are page margin, not checked.
+let CUT_REACH: CGFloat = 4
+let CUT_MIN_INK = 0.04
+let CUT_LINES = 3
+
+// A coordinate as a pixel index in 0...limit (limit itself ends a range).
+func clamp(_ v: CGFloat, _ limit: Int) -> Int {
+    v.isFinite ? min(limit, max(0, Int(v))) : 0
+}
+
+func cutLines(_ lines: [VNRecognizedTextObservation], in gray: Gray, outerRight: Bool) -> Int {
+    let w = CGFloat(gray.width), h = CGFloat(gray.height)
+    func px(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * w, y: (1 - p.y) * h) }
+    var count = 0
+    for o in lines where o.boundingBox.width >= 0.25 {
+        // the line's end on the outer side, and its slant
+        let tl = px(o.topLeft), tr = px(o.topRight), bl = px(o.bottomLeft), br = px(o.bottomRight)
+        let (top, bottom) = outerRight ? (tr, br) : (tl, bl)
+        let lh = hypot(top.x - bottom.x, top.y - bottom.y)
+        guard lh >= 6, br.x - bl.x > lh else { continue }
+        let slope = (br.y - bl.y) / (br.x - bl.x)
+        let end = outerRight ? max(top.x, bottom.x) : min(top.x, bottom.x)
+        let s0 = outerRight ? end + 0.3 * lh : 0, s1 = outerRight ? w : end - 0.3 * lh
+        // text right at the photo's edge, no room to look past it: cut
+        if s1 - s0 < 0.5 * lh { count += 1; continue }
+        guard s1 - s0 <= CUT_REACH * lh else { continue }
+        // dark for this line: halfway from its paper to its ink. Vision's
+        // boxes and corners can reach a little past the image's edge.
+        var levels: [Int] = []
+        let b = o.boundingBox
+        for y in stride(from: clamp((1 - b.maxY) * h, gray.height), to: clamp((1 - b.minY) * h, gray.height), by: 2) {
+            for x in stride(from: clamp(b.minX * w, gray.width), to: clamp(b.maxX * w, gray.width), by: 2) {
+                levels.append(Int(gray.pixels[y * gray.width + x]))
+            }
+        }
+        guard levels.count > 20 else { continue }
+        levels.sort()
+        let paper = levels[levels.count * 9 / 10], ink = levels[levels.count / 50]
+        guard paper - ink > 40 else { continue }
+        let dark = (paper + ink) / 2
+        // share of dark pixels in a band of the line's height (0 top, 1
+        // bottom), carried on along its slant across the strip
+        func share(_ from: CGFloat, _ to: CGFloat) -> Double {
+            var n = 0, inked = 0
+            for x in clamp(s0, gray.width)..<max(clamp(s0, gray.width), clamp(s1, gray.width)) {
+                let yTop = top.y + slope * (CGFloat(x) - top.x)
+                let y0 = clamp(yTop + from * lh, gray.height)
+                for y in y0..<max(y0, clamp(yTop + to * lh, gray.height)) {
+                    n += 1
+                    if Int(gray.pixels[y * gray.width + x]) < dark { inked += 1 }
+                }
+            }
+            return n == 0 ? 0 : Double(inked) / Double(n)
+        }
+        let middle = share(0.35, 0.65)
+        let edges = (share(0, 0.1) + share(0.9, 1)) / 2
+        if middle >= CUT_MIN_INK && middle >= 3 * edges { count += 1 }
+    }
+    return count
 }
 
 // Where to cut a two-page spread. The middle of the photo is only where the
@@ -194,6 +305,7 @@ func ocr(imagePath: String, splitSpread: Bool) -> String {
 
     let width = cgImage.width
     let height = cgImage.height
+    let shrink = min(1, BLUR_SIDE / Double(max(width, height)))
 
     // portrait images aren't two-page spreads — don't split even if asked
     if !splitSpread || width < height {
@@ -202,10 +314,11 @@ func ocr(imagePath: String, splitSpread: Bool) -> String {
                 "note: \(imagePath) is portrait (\(width)x\(height)); treating as single page\n"
                     .data(using: .utf8)!)
         }
-        return recognize(in: cgImage)
+        return page("page", cgImage, shrink: shrink)
     }
 
-    let midX = gutter(of: cgImage) ?? width / 2
+    let spine = gutter(of: cgImage)
+    let midX = spine ?? width / 2
     if midX != width / 2 {
         FileHandle.standardError.write(
             "note: \(imagePath): spine is off center; cutting at x=\(midX) of \(width)\n"
@@ -213,14 +326,28 @@ func ocr(imagePath: String, splitSpread: Bool) -> String {
     }
     guard let leftImage = cgImage.cropping(to: CGRect(x: 0, y: 0, width: midX, height: height)),
           let rightImage = cgImage.cropping(to: CGRect(x: midX, y: 0, width: width - midX, height: height)) else {
-        return recognize(in: cgImage)
+        return page("page", cgImage, shrink: shrink)
     }
-    // A delimiter, not a blank line, between the halves: a blank line in the
-    // raw output means "paragraph break" to clean.py, and each half needs its
-    // own margins in layout.py.
-    return [recognize(in: leftImage), recognize(in: rightImage)]
-        .filter { !$0.isEmpty }
-        .joined(separator: "\n===== right page =====\n")
+    // Each page gets a marker line, a blank page too, so pagecheck.py knows
+    // left from right when counting pages. A marker, not a blank line: a
+    // blank line in the raw output means "paragraph break" to clean.py, and
+    // each half needs its own margins in layout.py.
+    return [page("left page", leftImage, shrink: shrink, spine == nil ? " spine=none" : ""),
+            page("right page", rightImage, shrink: shrink)]
+        .joined(separator: "\n")
+}
+
+// One page's marker, with how blurry it is, then its text. `shrink` brings
+// the photo to BLUR_SIDE for the blur measure.
+func page(_ side: String, _ image: CGImage, shrink: Double, _ extra: String = "") -> String {
+    let gray = Gray(image)
+    let blur = (shrink < 1 ? Gray(image, scale: shrink) : gray).blur()
+        .map { String(format: " blur=%.3f", $0) } ?? ""
+    let (text, lines) = recognize(in: image, gray: gray)
+    // a page of a spread can run off the photo only on its outer side
+    let outer = side == "left page" ? false : side == "right page" ? true : nil
+    let cut = outer.map { cutLines(lines, in: gray, outerRight: $0) >= CUT_LINES } == true ? " edge=cut" : ""
+    return "===== \(side)\(blur)\(cut)\(extra) =====" + (text.isEmpty ? "" : "\n" + text)
 }
 
 let args = CommandLine.arguments
@@ -230,6 +357,4 @@ guard args.count >= 2 else {
 }
 let path = args[1]
 let split = !args.contains("--no-split")
-// a blank page prints nothing, so it can't pass for a paragraph break
-let result = ocr(imagePath: path, splitSpread: split)
-if !result.isEmpty { print(result) }
+print(ocr(imagePath: path, splitSpread: split))

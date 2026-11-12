@@ -241,6 +241,28 @@ class TestSubheadings(unittest.TestCase):
                     "Introduction Calendar, a super easy\nprintable guide on our site.\n")
         self.assertIn("Baby Food Introduction Calendar", out)
 
+    def test_long_subheading_with_no_break_after_it(self):
+        # set in body-size type and nearly full width, so layout sees no
+        # break after it: the title case and the sentence under it show it
+        out = clean("can usually take corrective feedback in good humor.\n\n"
+                    "Humble and Smart, but Not Hungry: The Lovable Slacker\n"
+                    "People who are humble and smart but not adequately hungry\n"
+                    "are the lovable slackers.\n")
+        self.assertIn("The Lovable Slacker\n\nPeople who are humble", out)
+
+    def test_a_list_of_names_wrapped_is_not_a_subheading(self):
+        out = clean("more than I can name here in this short note.\n\n"
+                    "Thanks also to Tracy Noble, Amy Hubbard, Karen Amador, Lynne\n"
+                    "Andrews, and the rest of our team for their help with every\n"
+                    "draft of the book.\n")
+        self.assertIn("Lynne Andrews, and the rest", out)
+
+    def test_first_line_of_a_paragraph_with_names_is_not_a_subheading(self):
+        out = clean("That was the end of it.\n\n"
+                    "Jeff Bailey, Clare Stone, and Bobby Brady Talked It Over\n"
+                    "with the rest of the team on Monday morning.\n")
+        self.assertIn("Talked It Over with the rest", out)
+
     def test_two_line_heading_ending_lowercase_stays_a_heading(self):
         out = clean("That is all for the first weeks.\n\nSleep: 3-6 Months (including\n"
                     "dropping the swaddle)\n\nIf you have not slept well yet, we have great news.\n")
@@ -306,6 +328,98 @@ class TestBlockKinds(unittest.TestCase):
         text, kinds = clean_with_kinds(raw)
         self.assertIn("without an end\n\nBOB\n\nRobert", text)
         self.assertEqual(kinds, ["p", "h2", "p"])
+
+
+class TestLostStops(unittest.TestCase):
+    """Vision often loses the stop and closing quote at a paragraph's end
+    ("feeling", "okayi"); layout's break still holds when the next line
+    opens a sentence."""
+
+    def test_break_after_a_lost_period(self):
+        out = clean("Of course, Jeff replied, doing his best to hide the growing\n"
+                    "pressure he was feeling\n\n"
+                    "The cousins agreed to get together for coffee in a week.\n")
+        self.assertIn("pressure he was feeling\n\nThe cousins agreed", out)
+
+    def test_break_before_an_opening_quote(self):
+        out = clean('He asked Bob the big question, the one he had been putting off, are you going\n'
+                    "to be in the office tomorrow or not\n\n"
+                    '"If surgery goes well and I do what the doctor tells me, I will."\n')
+        self.assertIn('or not\n\n"If surgery goes well', out)
+
+    def test_heading_without_a_stop_stands_alone(self):
+        out = clean("and that is the last of the advice we have on this, for now.\n\n"
+                    "#2: Fear of Conflict\n\n"
+                    "The desire to preserve artificial harmony stifles conflict.\n")
+        self.assertIn("#2: Fear of Conflict\n\nThe desire", out)
+
+    def test_lowercase_line_still_carries_on(self):
+        out = clean("She wondered whether he acts that way on purpose, and Jeff wondered\n\n"
+                    "out loud whether it was worth asking him about it at all.\n")
+        self.assertIn("Jeff wondered out loud", out)
+
+    def test_open_quote_or_bracket_carries_on(self):
+        # measured: a section name in quotes, and a note in brackets, wrapped
+        out = clean("To put the guidelines together in one place, see the section entitled \"Typical\n\n"
+                    "Days.\" It has everything you need.\n")
+        self.assertIn('entitled "Typical Days."', out)
+        out = clean("When they break out of the swaddle regularly, we remove it at night first. (See\n\n"
+                    "\"Sleep: 3-6 months\" section.)\n")
+        self.assertIn('first. (See "Sleep', out)
+
+    def test_a_sentence_after_a_name_that_lost_its_stop(self):
+        # "VB?" read as "VBi": a capital either side, but the next line goes
+        # on in lowercase, so it's a new sentence
+        out = clean("And what do you think is going to happen at VBi\n\n"
+                    "For a moment, Jeff wondered whether Ben was more concerned.\n")
+        self.assertIn("VBi\n\nFor a moment", out)
+
+    def test_labels_of_a_form_stand_apart(self):
+        out = clean("Scale:\n3 = Usually 2 = Sometimes 1 = Rarely\n\nHumble\n\nMy teammates would say:\n")
+        self.assertIn("Rarely\n\nHumble\n\nMy teammates", out)
+
+    def test_name_after_a_joining_word_carries_on(self):
+        out = clean("After lunch on Friday the three of them talked it over with\n\n"
+                    "Jeff and Clare in the conference room for an hour or so.\n")
+        self.assertIn("talked it over with Jeff and Clare", out)
+
+
+class TestPhotoCheck(unittest.TestCase):
+    """clean.py runs pagecheck.py: repeats are used once, and notes on the
+    photos go to the file named as a third argument."""
+
+    def page(self, seed):
+        lines = []
+        for i in range(10):
+            words = " ".join(f"w{seed}{i}{k}" for k in range(9))
+            lines.append(f"[0.1000 0.9000 {0.1 + i * 0.05:.4f} {0.12 + i * 0.05:.4f} 0.0180 0.5000] {words}.")
+        return lines
+
+    def run_clean(self, raw):
+        tmp = Path(tempfile.mkdtemp())
+        src, dst, notes = tmp / "raw.txt", tmp / "out.txt", tmp / "notes.txt"
+        src.write_text(raw, encoding="utf-8")
+        result = subprocess.run([sys.executable, str(HERE / "clean.py"), str(src), str(dst), str(notes)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return dst.read_text(encoding="utf-8"), notes.read_text(encoding="utf-8")
+
+    def test_repeated_photo_is_used_once_and_noted(self):
+        photo = ["===== left page blur=0.200 ====="] + self.page(1) + ["===== right page blur=0.200 ====="] + self.page(2)
+        raw = "\n".join(["===== IMG_1.jpg ====="] + photo + ["===== IMG_2.jpg ====="] + photo)
+        out, notes = self.run_clean(raw)
+        self.assertEqual(out.count("w100"), 1)
+        self.assertIn("IMG_2 repeats IMG_1", notes)
+
+    def test_no_problems_writes_an_empty_notes_file(self):
+        raw = "\n".join(["===== IMG_1.jpg =====", "===== page blur=0.200 ====="] + self.page(1))
+        _, notes = self.run_clean(raw)
+        self.assertEqual(notes, "")
+
+    def test_page_markers_never_reach_the_text(self):
+        raw = "\n".join(["===== IMG_1.jpg =====", "===== left page blur=0.200 spine=none ====="]
+                        + self.page(1) + ["===== right page blur=0.200 ====="] + self.page(2))
+        self.assertNotIn("=====", clean(raw))
 
 
 if __name__ == "__main__":

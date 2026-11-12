@@ -77,6 +77,34 @@ class TestQuoteInsideALine(unittest.TestCase):
                          'Jeff smiled. "Let\'s stick with jackasses for right now')
 
 
+    def test_stop_printed_before_the_garble_isnt_doubled(self):
+        # `night. "Let's` read as "night.iạiLet's": the i is the quote's, not
+        # a word, and the period is already there
+        self.assertEqual(fix("he decided to call it a night.iạiLet's not burn"),
+                         'he decided to call it a night. "Let\'s not burn')
+        with_i = lambda w: w in WORDS | {"i"}
+        self.assertEqual(quotemarks.fix_line("he decided to call it a night.iạiLet's not burn", "", "", with_i),
+                         'he decided to call it a night. "Let\'s not burn')
+        self.assertEqual(fix("Clare said.iạiWhat do we do"), 'Clare said. "What do we do')
+
+    def test_other_vietnamese_letters_vision_uses(self):
+        # seen on two books: "ồ" and "Ế" in the same garbles
+        self.assertEqual(fix("what needs to get done and keeping things organizedẾẾ", before='"It was about'),
+                         'what needs to get done and keeping things organized."')
+        self.assertEqual(fix("Craig said the same thing about youạồi", before='"Actually," Jeff replied, "'),
+                         'Craig said the same thing about you."')
+
+    def test_a_vietnamese_name_is_left_alone(self):
+        self.assertEqual(fix("He flew to Hồ Chí Minh City for the meeting."),
+                         "He flew to Hồ Chí Minh City for the meeting.")
+
+    def test_dash_printed_before_the_garble_stays_a_dash(self):
+        # `he—"` read as "he-iẠạiại"; ocrfix turns `-"` into `—"`
+        with_i = lambda w: w in WORDS | {"i", "he"}
+        self.assertEqual(quotemarks.fix_line("yesterday, and that he-iẠạiại", '"No, he said', "", with_i),
+                         'yesterday, and that he-"')
+
+
 class TestOpeningQuoteAtLineStart(unittest.TestCase):
     def test_letters_at_the_start(self):
         self.assertEqual(fix("ạWell, I'll take all the help I can get."), '"Well, I\'ll take all the help I can get.')

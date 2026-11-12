@@ -26,7 +26,7 @@ import re
 from typing import Callable, Optional
 
 # Letters seen in place of a quote and its punctuation.
-MARKS = "ạẠịỊằẰỗỖọỌặẶậẬ"
+MARKS = "ạẠịỊằẰỗỖồỒọỌặẶậẬếẾ"
 # The run: stray i/_ Vision adds around it, any punctuation it did read,
 # then the letters (with i, _, periods and ¿ mixed in), then more stray i/_.
 # ¿ and ¡ only count inside a run: on their own they stand for letters
@@ -171,6 +171,11 @@ def _ends_narration(before: str) -> Optional[str]:
     return None
 
 
+def _accented(word: str) -> bool:
+    """Has a letter with an accent that Vision doesn't make of a quote."""
+    return any(ord(c) > 127 and c.isalpha() and c not in MARKS for c in word)
+
+
 def fix_line(text: str, before: str = "", after: str = "",
              is_word: Optional[Callable[[str], bool]] = None) -> str:
     """`text` with garbled quote marks put back.
@@ -190,6 +195,12 @@ def fix_line(text: str, before: str = "", after: str = "",
             break
         head, tail = text[:m.start()], text[m.end():]
         lead, punct, trail = m["lead"], m["punct"], m["trail"]
+        # A stop or dash printed just before the garble is its punctuation
+        # ("night.iạiLet's" for `night. "Let's`, "he-iẠạ" for `he—"`), and
+        # the i after it belongs to the quote, not to a word.
+        stop = re.search(r"(?:\.\.\.|…|[.,?!;:\-—])$", head) if not punct else None
+        if stop:
+            head, punct, lead = head[:stop.start()], stop.group(0), ""
         word_before = re.search(r"[A-Za-z']*$", head).group(0)
         word_after = re.match(r"[A-Za-z']*", tail).group(0)
         # a lone lowercase mark inside a word ("Phạm"), with nothing around
@@ -198,8 +209,15 @@ def fix_line(text: str, before: str = "", after: str = "",
                 and len(m["core"]) == 1 and m["core"].islower() and tail[:1].islower()):
             pos = m.end()
             continue
+        # one in a word beside other accented letters: a Vietnamese name
+        # ("Hồ Chí Minh"), not a quote mark
+        next_word = re.match(r"\s*(\S*)", tail).group(1)
+        if (word_before and not lead and not punct and not trail and len(m["core"]) == 1
+                and m["core"].islower() and (_accented(word_before) or _accented(next_word))):
+            pos = m.end()
+            continue
         # a stray i ends the word before unless the word needs it ("Hawaii")
-        if lead and is_word and is_word(word_before + "i") and not is_word(word_before):
+        if lead and is_word and word_before and is_word(word_before + "i") and not is_word(word_before):
             head += "i"
         # the run can swallow a final y ("companịằ" for company")
         if (is_word and not punct and len(word_before) > 2 and set(m["core"]) & set("ịằ")
